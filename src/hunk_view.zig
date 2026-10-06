@@ -58,15 +58,7 @@ pub fn cycleHunkViewMode(app: *App) !void {
 /// restoreViewportFromAnchor.
 pub fn rebuildLineMap(app: *App) !void {
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(
-        app.allocator,
-        app.state.files,
-        &app.state.comment_store,
-        convertHunkViewMode(app),
-        shouldApplyHunkFiltering(app),
-        &app.state.collapsed_folds,
-        app.reviewAnchored(),
-    );
+    app.state.line_map = try line_map.LineMap.build(app.allocator, .{ .files = app.state.files, .comment_store = &app.state.comment_store, .hunk_view_mode = convertHunkViewMode(app), .apply_filtering = shouldApplyHunkFiltering(app), .collapsed_folds = &app.state.collapsed_folds, .review_threads = app.reviewAnchored(), .pr_description = app.reviewDescription() });
 }
 
 /// Capture viewport anchor for preserving position across LineMap rebuilds.
@@ -96,6 +88,9 @@ pub fn captureViewportAnchor(app: *App, reference_line: usize) ?ViewportAnchor {
             anchor_line = findHunkHeaderLine(app, record.file_idx, comment_info.parent_hunk_idx);
             anchor_hunk = comment_info.parent_hunk_idx;
         },
+        // Above every file: nothing to anchor to, so the fallback keeps the line
+        // index, which leaves a viewport at the top of the diff at the top.
+        .pr_description => return null,
         .review_thread => {
             // Threads carry no hunk index in the record; anchor to the file header.
             anchor_line = app.state.line_map.getFileHeaderLine(record.file_idx);

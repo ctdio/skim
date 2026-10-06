@@ -123,7 +123,7 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize,
     // Rebuild line map. Build first and swap after, so a failure here leaves
     // the existing map intact rather than deinit'd-then-dangling for app.deinit().
     const line_map_mod = @import("../line_map.zig");
-    const rebuilt = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true, &app.state.collapsed_folds, null);
+    const rebuilt = try line_map_mod.LineMap.build(allocator, .{ .files = files, .comment_store = &app.state.comment_store, .hunk_view_mode = .all, .apply_filtering = true, .collapsed_folds = &app.state.collapsed_folds });
     app.state.line_map.deinit();
     app.state.line_map = rebuilt;
 

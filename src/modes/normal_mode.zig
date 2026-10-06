@@ -522,13 +522,22 @@ fn toggleCommentTarget(app: *App) void {
 }
 
 /// Route the `o` key to the right expand/collapse target based on the record
-/// under the cursor: review threads toggle their own expansion, everything else
-/// falls through to the inline-comment toggle.
+/// under the cursor: review threads toggle their own expansion, the PR
+/// description folds as a whole, everything else falls through to the
+/// inline-comment toggle.
 fn toggleExpandUnderCursor(app: *App) !void {
     const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
     switch (record.line_type) {
         .review_thread => |thread_info| {
             try review_controller.toggleThreadExpanded(&app.state.review, app.allocator, thread_info.thread_idx);
+            app.needs_render = true;
+        },
+        .pr_description => {
+            review_controller.toggleDescriptionCollapsed(&app.state.review);
+            try hunk_view.rebuildLineMap(app);
+            // The block's header is always the first record.
+            app.state.global_cursor_line = 0;
+            app.state.global_scroll_offset = 0;
             app.needs_render = true;
         },
         else => CommentController.toggleCommentUnderCursorExpanded(app),

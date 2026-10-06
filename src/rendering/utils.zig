@@ -10,6 +10,7 @@ const width_util = @import("width.zig");
 const comment_block = @import("comment_block.zig");
 const CommentController = @import("../comments/controller.zig").CommentController;
 const thread_block = @import("thread_block.zig");
+const description_block = @import("description_block.zig");
 const review_controller = @import("../pr/review_controller.zig");
 const thread_placement = @import("../pr/thread_placement.zig");
 
@@ -1074,6 +1075,27 @@ pub const RenderUtils = struct {
         return thread_block.renderThreadDisplay(win, info, params.row, params.width, app.frameSegmentAllocator());
     }
 
+    /// Render one record of the PR description block above the first file
+    /// (delegates layout to the App-free `description_block`). Returns rows used.
+    pub fn renderPrDescription(app: *App, win: vaxis.Window, params: struct {
+        row: description_block.Row,
+        start_row: usize,
+        is_cursor: bool,
+    }) usize {
+        return description_block.drawRow(win, .{
+            .view = prDescriptionView(app),
+            .row = params.row,
+            .start_row = params.start_row,
+            .is_cursor = params.is_cursor,
+            .frame_allocator = app.frameSegmentAllocator(),
+        });
+    }
+
+    /// Rendered height of a PR description record — mirrors `renderPrDescription`.
+    pub fn prDescriptionHeight(app: *App, row: description_block.Row, width: usize) usize {
+        return description_block.rowHeight(prDescriptionView(app), row, width);
+    }
+
     /// Rendered height of a review-thread block — mirrors `renderReviewThread`'s
     /// row count (both go through `thread_block`). Used by navigation's
     /// per-record height calc so cursor/scroll math matches the drawn block.
@@ -1458,6 +1480,18 @@ pub const RenderUtils = struct {
     ) ?*const comments.Comment {
         const idx = app.state.comment_store.findCommentAt(file_path, hunk_idx, line_idx_in_hunk) orelse return null;
         return app.state.comment_store.getComment(idx);
+    }
+
+    fn prDescriptionView(app: *App) description_block.DescriptionView {
+        const review = &app.state.review;
+        return .{
+            .number = review.number,
+            .title = review.title,
+            .author = review.author,
+            .body = review.body,
+            .placeholder = review_controller.descriptionPlaceholder(review),
+            .collapsed = review.description_collapsed,
+        };
     }
 
     fn buildThreadRenderInfo(app: *App, thread_idx: usize, is_bucket: bool, is_cursor: bool) ?thread_block.ThreadRenderInfo {

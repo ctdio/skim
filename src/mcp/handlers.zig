@@ -270,15 +270,7 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = line_map.LineMap.build(
-        app.allocator,
-        app.state.files,
-        &app.state.comment_store,
-        hunk_view.convertHunkViewMode(app),
-        hunk_view.shouldApplyHunkFiltering(app),
-        &app.state.collapsed_folds,
-        app.reviewAnchored(),
-    ) catch {
+    app.state.line_map = line_map.LineMap.build(app.allocator, .{ .files = app.state.files, .comment_store = &app.state.comment_store, .hunk_view_mode = hunk_view.convertHunkViewMode(app), .apply_filtering = hunk_view.shouldApplyHunkFiltering(app), .collapsed_folds = &app.state.collapsed_folds, .review_threads = app.reviewAnchored(), .pr_description = app.reviewDescription() }) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
     };
     app.needs_render = true;
@@ -412,15 +404,7 @@ pub fn handleDeleteComment(app: *App, params: ?std.json.Value) tui_server.Respon
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = line_map.LineMap.build(
-        app.allocator,
-        app.state.files,
-        &app.state.comment_store,
-        hunk_view.convertHunkViewMode(app),
-        hunk_view.shouldApplyHunkFiltering(app),
-        &app.state.collapsed_folds,
-        app.reviewAnchored(),
-    ) catch {
+    app.state.line_map = line_map.LineMap.build(app.allocator, .{ .files = app.state.files, .comment_store = &app.state.comment_store, .hunk_view_mode = hunk_view.convertHunkViewMode(app), .apply_filtering = hunk_view.shouldApplyHunkFiltering(app), .collapsed_folds = &app.state.collapsed_folds, .review_threads = app.reviewAnchored(), .pr_description = app.reviewDescription() }) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
     };
     app.needs_render = true;

@@ -36,7 +36,7 @@ pub const CommentController = struct {
         var existing_comment_idx: ?usize = null;
 
         switch (record.line_type) {
-            .file_header, .hunk_header, .spacer, .review_thread => {
+            .file_header, .hunk_header, .spacer, .review_thread, .pr_description => {
                 // Can't comment on these line types (GitHub review threads are
                 // read-only in this phase — no local comment editing on them).
                 return;

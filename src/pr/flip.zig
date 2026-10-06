@@ -166,6 +166,12 @@ pub fn changedFiles(allocator: Allocator, pair: struct { seen: []const parser.Fi
 /// Snapshot the diff cursor (file path + line number) for `number`.
 pub fn rememberCursor(state: *FlipState, params: RememberParams) !void {
     const record = params.line_map.getLineRecord(params.cursor_line) orelse return;
+    // On the description block the reader is at the top of the PR, which is
+    // where an unremembered PR opens: forget any older position.
+    if (record.line_type == .pr_description) {
+        if (state.cursor_memory.fetchRemove(params.number)) |kv| params.allocator.free(kv.value.file_path);
+        return;
+    }
     if (record.file_idx >= params.files.len) return;
     const file = &params.files[record.file_idx];
     var memory: CursorMemory = .{
@@ -446,7 +452,7 @@ const Fixture = struct {
         errdefer freeFiles(files);
         var comment_store = comments.CommentStore.init(testing.allocator);
         errdefer comment_store.deinit();
-        const map = try line_map.LineMap.build(testing.allocator, files, &comment_store, .all, false, null, null);
+        const map = try line_map.LineMap.build(testing.allocator, .{ .files = files, .comment_store = &comment_store, .hunk_view_mode = .all, .apply_filtering = false });
         return .{ .files = files, .comment_store = comment_store, .map = map };
     }
 

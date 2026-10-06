@@ -16,6 +16,7 @@ pub const diff_loader = @import("git/diff_loader.zig");
 pub const surface_controller = @import("pr/surface_controller.zig");
 pub const thread_block = @import("rendering/thread_block.zig");
 pub const comment_block = @import("rendering/comment_block.zig");
+pub const description_block = @import("rendering/description_block.zig");
 pub const widthUtil = @import("rendering/width.zig");
 pub const thread_hint = @import("pr/thread_hint.zig");
 pub const harness = @import("testing/harness.zig");

@@ -282,6 +282,10 @@ pub const Navigation = struct {
                 const width = if (app.state.viewport_width > 0) app.state.viewport_width else 80;
                 return RenderUtils.reviewThreadHeight(app, thread_info.thread_idx, thread_info.placement == .file_bucket, width);
             },
+            .pr_description => |description_row| {
+                const width = if (app.state.viewport_width > 0) app.state.viewport_width else 80;
+                return RenderUtils.prDescriptionHeight(app, description_row, width);
+            },
             else => return 1,
         }
     }

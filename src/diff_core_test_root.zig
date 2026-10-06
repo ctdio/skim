@@ -1,7 +1,8 @@
 //! Test root for the core diff data path: the unified-diff parser, the LineMap
-//! record registry, the comment store, and the streaming diff loader.
+//! record registry, the comment store, the streaming diff loader, and the PR
+//! description block drawn from LineMap records.
 //!
-//! These four modules are reachable from `main.zig` only through `app.zig`, and
+//! These modules are reachable from `main.zig` only through `app.zig`, and
 //! a transitively-imported file does not reliably contribute its `test {}`
 //! blocks to the `main.zig`-rooted binary (see the note on `width_tests` in
 //! build.zig). Rooted *directly* by `addTest` so every listed file's own tests
@@ -14,6 +15,7 @@ pub const parser = @import("git/parser.zig");
 pub const diff_loader = @import("git/diff_loader.zig");
 pub const line_map = @import("line_map.zig");
 pub const comment_store = @import("comments/store.zig");
+pub const description_block = @import("rendering/description_block.zig");
 
 test {
     std.testing.refAllDecls(@This());

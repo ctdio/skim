@@ -8,6 +8,9 @@ const Allocator = std.mem.Allocator;
 /// Number of blank lines between files
 pub const file_spacing = 3;
 
+/// Number of blank lines between the PR description block and the first file
+pub const description_spacing = 2;
+
 /// Type of line with associated metadata
 pub const LineType = union(enum) {
     /// File header line (e.g., "diff --git a/file.txt b/file.txt")
@@ -39,6 +42,15 @@ pub const LineType = union(enum) {
     review_thread: struct {
         thread_idx: usize,
         placement: enum { inline_line, file_bucket },
+    },
+
+    /// PR description block above the first file (review sessions only). One
+    /// record per source line of the description, so a long description scrolls
+    /// line by line instead of as one block taller than the viewport.
+    /// `line_idx` indexes the description's lines for `.body_line`.
+    pr_description: struct {
+        kind: enum { header, body_line, bottom, gap },
+        line_idx: usize = 0,
     },
 
     /// Blank spacer line (between files or after file header)
@@ -77,6 +89,13 @@ const CommentLocContext = struct {
             a.line_idx == b.line_idx and
             std.mem.eql(u8, a.file_path, b.file_path);
     }
+};
+
+/// Shape of the PR description block `LineMap.build` emits above the first
+/// file. The text itself is looked up at render time.
+pub const DescriptionLayout = struct {
+    line_count: usize,
+    collapsed: bool,
 };
 
 const CommentLocMap = std.HashMapUnmanaged(
@@ -195,37 +214,45 @@ pub const LineMap = struct {
         }
     };
 
-    /// Build a line map from files and comments
-    pub fn build(
-        allocator: Allocator,
+    /// What `build` and `appendFiles` emit records for.
+    pub const BuildParams = struct {
+        /// The whole file list. `appendFiles` takes it with the new files at the end.
         files: []const parser.FileDiff,
         comment_store: *comments.CommentStore,
         hunk_view_mode: HunkViewMode,
-        apply_filtering: bool, // Only apply filtering in unified view
-        collapsed_folds: ?*const std.AutoHashMap(u64, void), // Optional fold state
-        review_threads: ?[]const thread_placement.AnchoredThread, // GitHub review-thread anchors (null → no thread records)
-    ) !LineMap {
+        /// Only applied in unified view
+        apply_filtering: bool,
+        collapsed_folds: ?*const std.AutoHashMap(u64, void) = null,
+        /// GitHub review-thread anchors (null → no thread records)
+        review_threads: ?[]const thread_placement.AnchoredThread = null,
+        /// PR description block above the first file (null → none)
+        pr_description: ?DescriptionLayout = null,
+    };
+
+    /// Build a line map from files and comments
+    pub fn build(allocator: Allocator, params: BuildParams) !LineMap {
         var records: std.ArrayList(LineRecord) = .empty;
         errdefer records.deinit(allocator);
 
         // Pre-allocate file header cache
-        const file_header_lines = try allocator.alloc(usize, files.len);
+        const file_header_lines = try allocator.alloc(usize, params.files.len);
         errdefer allocator.free(file_header_lines);
 
         var global_line: usize = 0;
 
         try appendRange(.{
             .allocator = allocator,
-            .files = files,
+            .files = params.files,
             .first_new = 0,
             .records = &records,
             .file_header_lines = file_header_lines,
             .global_line = &global_line,
-            .comment_store = comment_store,
-            .hunk_view_mode = hunk_view_mode,
-            .apply_filtering = apply_filtering,
-            .collapsed_folds = collapsed_folds,
-            .review_threads = review_threads,
+            .comment_store = params.comment_store,
+            .hunk_view_mode = params.hunk_view_mode,
+            .apply_filtering = params.apply_filtering,
+            .collapsed_folds = params.collapsed_folds,
+            .review_threads = params.review_threads,
+            .pr_description = params.pr_description,
         });
 
         return LineMap{
@@ -236,17 +263,6 @@ pub const LineMap = struct {
         };
     }
 
-    /// What `appendFiles` needs to emit records for the files it adds.
-    pub const AppendParams = struct {
-        /// The whole file list, old files first, with the new ones at the end.
-        files: []const parser.FileDiff,
-        comment_store: *comments.CommentStore,
-        hunk_view_mode: HunkViewMode,
-        apply_filtering: bool,
-        collapsed_folds: ?*const std.AutoHashMap(u64, void) = null,
-        review_threads: ?[]const thread_placement.AnchoredThread = null,
-    };
-
     /// Extend the map with files appended to the end of the diff.
     ///
     /// A record's global line number is also its index, so files added at the
@@ -255,7 +271,7 @@ pub const LineMap = struct {
     /// record already emitted, which costs O(batches x total lines): on a
     /// 139k-line diff that was 44ms of main-thread work during the load, with
     /// single batches reaching 6ms.
-    pub fn appendFiles(self: *LineMap, params: AppendParams) !void {
+    pub fn appendFiles(self: *LineMap, params: BuildParams) !void {
         const allocator = self.allocator;
         const first_new = self.file_header_lines.len;
         if (first_new >= params.files.len) return;
@@ -305,6 +321,7 @@ pub const LineMap = struct {
             .apply_filtering = params.apply_filtering,
             .collapsed_folds = params.collapsed_folds,
             .review_threads = params.review_threads,
+            .pr_description = params.pr_description,
         });
     }
 
@@ -323,6 +340,7 @@ pub const LineMap = struct {
         apply_filtering: bool,
         collapsed_folds: ?*const std.AutoHashMap(u64, void),
         review_threads: ?[]const thread_placement.AnchoredThread,
+        pr_description: ?DescriptionLayout,
     };
 
     /// Emit the records for `files[first_new..]`, continuing from the caller's
@@ -343,6 +361,15 @@ pub const LineMap = struct {
 
         var global_line = params.global_line.*;
         defer params.global_line.* = global_line;
+
+        // The description renders against file 0 (every record names a file),
+        // so it only exists once there is a first file to sit above.
+        if (params.first_new == 0 and files.len > 0) {
+            if (params.pr_description) |layout| {
+                const emitter = DescriptionEmitter{ .allocator = allocator, .records = records, .global_line = &global_line };
+                try emitter.emitBlock(layout);
+            }
+        }
 
         for (files[params.first_new..], params.first_new..) |*file, file_idx| {
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
@@ -536,6 +563,38 @@ pub const LineMap = struct {
         }
     }
 
+    /// Emits the description block's records: a header, then (unless
+    /// collapsed) one record per line and a bottom border, then the gap rows.
+    const DescriptionEmitter = struct {
+        allocator: Allocator,
+        records: *std.ArrayList(LineRecord),
+        global_line: *usize,
+
+        fn emitBlock(self: DescriptionEmitter, layout: DescriptionLayout) !void {
+            try self.emit(.{ .kind = .header });
+            if (!layout.collapsed) {
+                var line_idx: usize = 0;
+                while (line_idx < layout.line_count) : (line_idx += 1) {
+                    try self.emit(.{ .kind = .body_line, .line_idx = line_idx });
+                }
+                try self.emit(.{ .kind = .bottom });
+            }
+            var gap: usize = 0;
+            while (gap < description_spacing) : (gap += 1) {
+                try self.emit(.{ .kind = .gap });
+            }
+        }
+
+        fn emit(self: DescriptionEmitter, row: @FieldType(LineType, "pr_description")) !void {
+            try self.records.append(self.allocator, .{
+                .global_line = self.global_line.*,
+                .file_idx = 0,
+                .line_type = .{ .pr_description = row },
+            });
+            self.global_line.* += 1;
+        }
+    };
+
     pub fn deinit(self: *LineMap) void {
         self.allocator.free(self.file_header_lines);
         self.allocator.free(self.records.ptr[0..self.records_capacity]);
@@ -675,7 +734,7 @@ test "line map basic construction" {
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
 
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var line_map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer line_map.deinit();
 
     // File 1: header(0) + header_spacer(1) + hunk_header(2) + 2 lines(3,4) + file_spacers(5,6,7) = 8 lines
@@ -739,7 +798,7 @@ test "line map with comments" {
         .old_lineno = 1,
     });
 
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var line_map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer line_map.deinit();
 
     // header(0) + header_spacer(1) + hunk_header(2) + delete_line(3) + comment(4) + add_line(5) = 6 lines
@@ -801,7 +860,7 @@ test "a range comment starting on a line suppresses a later single comment there
         .old_lineno = 1,
     });
 
-    var map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer map.deinit();
 
     // The range comment renders at its END line (line_idx 1), and the start
@@ -855,7 +914,7 @@ test "comments attach to the file whose path matches" {
         .old_lineno = 1,
     });
 
-    var map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer map.deinit();
 
     var owner_file_idx: ?usize = null;
@@ -911,7 +970,7 @@ test "comment deletion scroll anchoring" {
     });
 
     // Build LineMap with comment
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var line_map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
 
     // Structure:
     // 0: file_header
@@ -990,7 +1049,7 @@ test "comment deletion scroll anchoring" {
     line_map.deinit();
     try store.deleteComment(comment_idx);
 
-    line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    line_map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer line_map.deinit();
 
     // After deletion: 10 lines (was 11, minus 1 comment)
@@ -1070,7 +1129,7 @@ test "comment deletion with multiple comments above" {
     });
 
     // Build LineMap with comments
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var line_map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
 
     // Structure (approximate):
     // 0: file_header
@@ -1128,7 +1187,7 @@ test "comment deletion with multiple comments above" {
     // Now delete comment 3 and rebuild
     line_map.deinit();
     try store.deleteComment(comment3_idx.?);
-    line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    line_map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer line_map.deinit();
 
     // After deletion: 15 lines (was 16)
@@ -1185,10 +1244,10 @@ test "appending the rest of a diff matches building it all at once" {
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
 
-    var whole = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var whole = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer whole.deinit();
 
-    var grown = try LineMap.build(allocator, files[0..1], &store, .all, true, null, null);
+    var grown = try LineMap.build(allocator, .{ .files = files[0..1], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer grown.deinit();
     try grown.appendFiles(.{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
 
@@ -1208,16 +1267,120 @@ test "appending one file at a time matches building it all at once" {
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
 
-    var whole = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    var whole = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer whole.deinit();
 
-    var grown = try LineMap.build(allocator, files[0..1], &store, .all, true, null, null);
+    var grown = try LineMap.build(allocator, .{ .files = files[0..1], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer grown.deinit();
 
     try grown.appendFiles(.{ .files = files[0..2], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     try grown.appendFiles(.{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
 
     try std.testing.expectEqual(whole.getTotalLines(), grown.getTotalLines());
+    try std.testing.expectEqualDeep(whole.records, grown.records);
+    try std.testing.expectEqualSlices(usize, whole.file_header_lines, grown.file_header_lines);
+}
+
+test "pr description records precede the first file header" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var map = try LineMap.build(allocator, .{
+        .files = files,
+        .comment_store = &store,
+        .hunk_view_mode = .all,
+        .apply_filtering = true,
+        .pr_description = .{ .line_count = 2, .collapsed = false },
+    });
+    defer map.deinit();
+
+    const Row = @FieldType(LineType, "pr_description");
+    const expected = [_]Row{
+        .{ .kind = .header },
+        .{ .kind = .body_line, .line_idx = 0 },
+        .{ .kind = .body_line, .line_idx = 1 },
+        .{ .kind = .bottom },
+        .{ .kind = .gap },
+        .{ .kind = .gap },
+    };
+    for (expected, 0..) |row, i| {
+        try std.testing.expectEqualDeep(LineType{ .pr_description = row }, map.records[i].line_type);
+        try std.testing.expectEqual(i, map.records[i].global_line);
+    }
+    try std.testing.expectEqual(@as(?usize, expected.len), map.getFileHeaderLine(0));
+    try std.testing.expect(map.isFileHeader(expected.len));
+}
+
+test "collapsed pr description keeps only its header and gap" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var map = try LineMap.build(allocator, .{
+        .files = files,
+        .comment_store = &store,
+        .hunk_view_mode = .all,
+        .apply_filtering = true,
+        .pr_description = .{ .line_count = 40, .collapsed = true },
+    });
+    defer map.deinit();
+
+    try std.testing.expectEqualDeep(LineType{ .pr_description = .{ .kind = .header } }, map.records[0].line_type);
+    try std.testing.expectEqualDeep(LineType{ .pr_description = .{ .kind = .gap } }, map.records[1].line_type);
+    try std.testing.expectEqualDeep(LineType{ .pr_description = .{ .kind = .gap } }, map.records[2].line_type);
+    try std.testing.expectEqual(@as(?usize, 3), map.getFileHeaderLine(0));
+}
+
+test "pr description is omitted when there are no files" {
+    const allocator = std.testing.allocator;
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var map = try LineMap.build(allocator, .{
+        .files = &.{},
+        .comment_store = &store,
+        .hunk_view_mode = .all,
+        .apply_filtering = true,
+        .pr_description = .{ .line_count = 3, .collapsed = false },
+    });
+    defer map.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), map.getTotalLines());
+}
+
+test "streaming a pr diff in batches emits the description once, above the first file" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    const layout: DescriptionLayout = .{ .line_count = 3, .collapsed = false };
+    var whole = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .pr_description = layout });
+    defer whole.deinit();
+
+    var grown = try LineMap.build(allocator, .{ .files = &.{}, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .pr_description = layout });
+    defer grown.deinit();
+    try grown.appendFiles(.{ .files = files[0..1], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .pr_description = layout });
+    try grown.appendFiles(.{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .pr_description = layout });
+
     try std.testing.expectEqualDeep(whole.records, grown.records);
     try std.testing.expectEqualSlices(usize, whole.file_header_lines, grown.file_header_lines);
 }

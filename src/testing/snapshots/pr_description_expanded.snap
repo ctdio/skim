@@ -1,0 +1,8 @@
+┌ #42 Add retry to the sync worker · alice  (o to collapse)
+│ ## Why
+│ Sync gave up on the first network error, so a flaky
+│ connection left the sidebar stale until restart.
+│
+│ ## What
+│ - retry with backoff
+└─

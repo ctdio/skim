@@ -18,6 +18,7 @@ const diff_loader = review.diff_loader;
 const surface_controller = review.surface_controller;
 const thread_block = review.thread_block;
 const comment_block = review.comment_block;
+const description_block = review.description_block;
 const thread_hint = review.thread_hint;
 const harness = review.harness;
 const snapshot = review.snapshot;
@@ -270,7 +271,7 @@ test "LineMap: inline thread emits a review_thread record after its code line" {
     const anchored = try anchorThreads(allocator, &threads, &files);
     defer allocator.free(anchored);
 
-    var map = try line_map.LineMap.build(allocator, &files, &store, .all, true, null, anchored);
+    var map = try line_map.LineMap.build(allocator, .{ .files = &files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = anchored });
     defer map.deinit();
 
     const thread_line = map.findLineByThreadIdx(0) orelse return error.ThreadRecordMissing;
@@ -295,7 +296,7 @@ test "LineMap: file-bucket thread emits a record before the first hunk header" {
     const anchored = try anchorThreads(allocator, &threads, &files);
     defer allocator.free(anchored);
 
-    var map = try line_map.LineMap.build(allocator, &files, &store, .all, true, null, anchored);
+    var map = try line_map.LineMap.build(allocator, .{ .files = &files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = anchored });
     defer map.deinit();
 
     const thread_line = map.findLineByThreadIdx(0) orelse return error.ThreadRecordMissing;
@@ -318,16 +319,16 @@ test "LineMap: null review_threads yields identical records to omitting threads"
     const anchored = try anchorThreads(allocator, &threads, &files);
     defer allocator.free(anchored);
 
-    var with_null = try line_map.LineMap.build(allocator, &files, &store, .all, true, null, null);
+    var with_null = try line_map.LineMap.build(allocator, .{ .files = &files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
     defer with_null.deinit();
-    var with_empty = try line_map.LineMap.build(allocator, &files, &store, .all, true, null, &.{});
+    var with_empty = try line_map.LineMap.build(allocator, .{ .files = &files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = &.{} });
     defer with_empty.deinit();
 
     try testing.expectEqual(with_null.records.len, with_empty.records.len);
     try testing.expect(with_null.findLineByThreadIdx(0) == null);
 
     // And a map WITH the anchors has strictly more records (one per thread).
-    var with_threads = try line_map.LineMap.build(allocator, &files, &store, .all, true, null, anchored);
+    var with_threads = try line_map.LineMap.build(allocator, .{ .files = &files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = anchored });
     defer with_threads.deinit();
     try testing.expectEqual(with_null.records.len + 1, with_threads.records.len);
 }
@@ -345,7 +346,7 @@ test "LineMap: two inline threads on one line emit two consecutive records in or
     const anchored = try anchorThreads(allocator, &threads, &files);
     defer allocator.free(anchored);
 
-    var map = try line_map.LineMap.build(allocator, &files, &store, .all, true, null, anchored);
+    var map = try line_map.LineMap.build(allocator, .{ .files = &files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = anchored });
     defer map.deinit();
 
     const first = map.findLineByThreadIdx(0) orelse return error.ThreadRecordMissing;
@@ -392,6 +393,59 @@ test "threadDisplayHeight equals the rows renderThreadDisplay actually draws" {
     const drawn = thread_block.renderThreadDisplay(ctx.window(), info, 0, width, ctx.frameAllocator());
 
     try testing.expectEqual(height, drawn);
+}
+
+test "snapshot: pr_description_expanded" {
+    try renderDescriptionSnapshot("pr_description_expanded", .{
+        .number = 42,
+        .title = "Add retry to the sync worker",
+        .author = "alice",
+        .body = "## Why\r\nSync gave up on the first network error, so a flaky connection left the sidebar stale until restart.\r\n\r\n## What\r\n- retry with backoff\r\n",
+        .placeholder = "No description.",
+        .collapsed = false,
+    });
+}
+
+test "snapshot: pr_description_collapsed" {
+    try renderDescriptionSnapshot("pr_description_collapsed", .{
+        .number = 42,
+        .title = "Add retry to the sync worker",
+        .author = "alice",
+        .body = "## Why\nlong text",
+        .placeholder = "No description.",
+        .collapsed = true,
+    });
+}
+
+test "snapshot: pr_description_loading" {
+    try renderDescriptionSnapshot("pr_description_loading", .{
+        .number = 7,
+        .title = "Bump deps",
+        .author = "bob",
+        .body = "",
+        .placeholder = "Loading description…",
+        .collapsed = false,
+    });
+}
+
+test "description rowHeight equals the rows drawRow draws for a wrapped line" {
+    const view: description_block.DescriptionView = .{
+        .number = 1,
+        .title = "t",
+        .author = "a",
+        .body = "a long description line that wraps across several rows of a narrow window",
+        .placeholder = "",
+        .collapsed = false,
+    };
+    const row: description_block.Row = .{ .kind = .body_line, .line_idx = 0 };
+    const width: u16 = 24;
+
+    var ctx = try harness.createTestContext(testing.allocator, width, 20);
+    defer ctx.deinit();
+    const drawn = description_block.drawRow(ctx.window(), .{ .view = view, .row = row, .start_row = 0, .is_cursor = false, .frame_allocator = ctx.frameAllocator() });
+
+    try testing.expectEqual(description_block.rowHeight(view, row, width), drawn);
+    try testing.expect(drawn > 1);
 }
 
 test "snapshot: thread_collapsed" {
@@ -1944,6 +1998,44 @@ fn renderHintSnapshot(name: []const u8, hint: thread_hint.ThreadHint, thread_res
 
     var seg = [_]vaxis.Cell.Segment{.{ .text = thread_hint.hintText(hint, thread_resolved), .style = .{} }};
     _ = ctx.window().print(&seg, .{ .row_offset = 0 });
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
+
+/// Draw every description record a LineMap emits for `view` above a one-file
+/// diff, the way the diff renderers walk them, and compare against `name`.
+fn renderDescriptionSnapshot(name: []const u8, view: description_block.DescriptionView) !void {
+    const allocator = testing.allocator;
+    var files = singleFile();
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+    var map = try line_map.LineMap.build(allocator, .{
+        .files = &files,
+        .comment_store = &store,
+        .hunk_view_mode = .all,
+        .apply_filtering = true,
+        .pr_description = .{ .line_count = description_block.lineCount(view.body), .collapsed = view.collapsed },
+    });
+    defer map.deinit();
+
+    var ctx = try harness.createTestContext(allocator, 60, 16);
+    defer ctx.deinit();
+
+    var row: usize = 0;
+    for (map.records) |record| {
+        switch (record.line_type) {
+            .pr_description => |description_row| row += description_block.drawRow(ctx.window(), .{
+                .view = view,
+                .row = description_row,
+                .start_row = row,
+                .is_cursor = false,
+                .frame_allocator = ctx.frameAllocator(),
+            }),
+            else => break,
+        }
+    }
 
     const text = try ctx.captureToText();
     defer allocator.free(text);

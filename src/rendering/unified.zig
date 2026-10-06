@@ -69,7 +69,7 @@ pub const UnifiedRenderer = struct {
 
             // Render sidebar for all line types except spacers, file headers, and
             // review threads (thread blocks draw their own left border at col 0).
-            if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread) {
+            if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread and record.line_type != .pr_description) {
                 cells.fillGlyph(win, "┃", .{ .col = 0, .row = @intCast(row), .style = sidebar_style });
             }
 
@@ -219,6 +219,13 @@ pub const UnifiedRenderer = struct {
                             }
                         }
                     }
+                },
+                .pr_description => |description_row| {
+                    row += RenderUtils.renderPrDescription(app, win, .{
+                        .row = description_row,
+                        .start_row = row,
+                        .is_cursor = is_cursor,
+                    });
                 },
                 .spacer => {
                     // Render spacer - just empty line with cursor highlight if needed (no left border)

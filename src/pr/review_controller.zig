@@ -359,6 +359,10 @@ pub const ReviewSession = struct {
     // transient and cleared on every `applyFetchedData`, so they are exempt from
     // AD-4's node-ID identity rule (this is view state, not review data).
     expanded_threads: std.AutoHashMapUnmanaged(usize, void) = .{},
+    // Whether the description block above the diff is folded. A view preference
+    // for the whole run, kept across PR switches so a reviewer who folds it is
+    // not shown it again on every flip.
+    description_collapsed: bool = false,
 
     // Async machinery (AD-3).
     entry: PendingEntry = .{},
@@ -847,6 +851,19 @@ pub fn toggleCommentTarget(self: *ReviewSession) CommentTarget {
         .local => .github,
     };
     return self.comment_target;
+}
+
+/// Fold or unfold the description block above the diff.
+pub fn toggleDescriptionCollapsed(self: *ReviewSession) void {
+    self.description_collapsed = !self.description_collapsed;
+}
+
+/// The line the description block shows when the PR has no body. Without
+/// review data an empty body means "not fetched yet", not "no description".
+pub fn descriptionPlaceholder(self: *const ReviewSession) []const u8 {
+    if (!self.data_unavailable) return "No description.";
+    if (refreshInFlight(self)) return "Loading description…";
+    return "Description unavailable — press r to retry";
 }
 
 /// Whether new comments should post to GitHub as drafts (session active AND
@@ -2788,6 +2805,24 @@ test "deinitState: clean on a never-used session" {
     var session = ReviewSession{};
     deinitState(&session, testing.allocator);
     try testing.expect(!isActive(&session));
+}
+
+test "descriptionPlaceholder: fetched PR with an empty body has no description" {
+    const session = ReviewSession{};
+    try testing.expectEqualStrings("No description.", descriptionPlaceholder(&session));
+}
+
+test "descriptionPlaceholder: review data still loading" {
+    var session = ReviewSession{};
+    session.data_unavailable = true;
+    session.refetch_after_join = true;
+    try testing.expectEqualStrings("Loading description…", descriptionPlaceholder(&session));
+}
+
+test "descriptionPlaceholder: failed fetch points at the retry key" {
+    var session = ReviewSession{};
+    session.data_unavailable = true;
+    try testing.expectEqualStrings("Description unavailable — press r to retry", descriptionPlaceholder(&session));
 }
 
 test "infoLineCount: zero when nothing is displayed" {

@@ -85,7 +85,7 @@ pub const SideBySideRenderer = struct {
             // Render sidebar and middle divider for all line types except spacers,
             // file headers, and review threads (thread blocks are full-width and
             // draw their own left border, like comment boxes).
-            if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread) {
+            if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread and record.line_type != .pr_description) {
                 cells.fillGlyph(win, "┃", .{ .col = 0, .row = @intCast(row), .style = sidebar_style });
                 cells.fillGlyph(win, FrameChars.vertical, .{
                     .col = @intCast(middle_col),
@@ -244,6 +244,13 @@ pub const SideBySideRenderer = struct {
                             }
                         }
                     }
+                },
+                .pr_description => |description_row| {
+                    row += RenderUtils.renderPrDescription(app, win, .{
+                        .row = description_row,
+                        .start_row = row,
+                        .is_cursor = is_cursor,
+                    });
                 },
                 .spacer => {
                     // Render spacer - just empty line with cursor highlight if needed (no borders)

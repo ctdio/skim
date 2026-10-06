@@ -193,7 +193,7 @@ fn foldTargetUnderCursor(app: *App) ?FoldTarget {
         .hunk_header => |hunk_info| .{ .file_idx = record.file_idx, .hunk_idx = hunk_info.hunk_idx },
         .code_line => |code_info| .{ .file_idx = record.file_idx, .hunk_idx = code_info.hunk_idx },
         .comment_line => |comment_info| .{ .file_idx = record.file_idx, .hunk_idx = comment_info.parent_hunk_idx },
-        .review_thread, .spacer => null,
+        .review_thread, .pr_description, .spacer => null,
     };
 }
 

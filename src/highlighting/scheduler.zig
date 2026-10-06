@@ -302,7 +302,7 @@ fn testDiff(allocator: std.mem.Allocator, diff_text: []const u8) !struct {
     const files = try parser.parse(allocator, diff_text);
     const store = try allocator.create(comments.CommentStore);
     store.* = comments.CommentStore.init(allocator);
-    const map = try LineMap.build(allocator, files, store, .all, true, null, null);
+    const map = try LineMap.build(allocator, .{ .files = files, .comment_store = store, .hunk_view_mode = .all, .apply_filtering = true });
     return .{ .files = files, .store = store, .map = map };
 }
 
