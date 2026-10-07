@@ -19,10 +19,13 @@ pub const BeginMode = enum { deferred, immediate };
 /// Distinguishes BLOB from TEXT at bind sites (both are byte slices).
 pub const Blob = struct { bytes: []const u8 };
 
-/// `SQLITE_TRANSIENT` translates to a cast of -1 that does not compile as a
-/// pointer; this is the same sentinel. It makes SQLite copy bound bytes, so
-/// bind sites carry no lifetime rules.
-const transient: c.sqlite3_destructor_type = @ptrFromInt(std.math.maxInt(usize));
+/// `SQLITE_TRANSIENT` is a function pointer of -1, which Zig rejects as a
+/// misaligned address, so the two bind calls that take it are redeclared with
+/// the destructor as a plain integer (same ABI). It makes SQLite copy bound
+/// bytes, so bind sites carry no lifetime rules.
+const transient: isize = -1;
+extern fn sqlite3_bind_text64(*c.sqlite3_stmt, c_int, [*]const u8, u64, destructor: isize, encoding: u8) c_int;
+extern fn sqlite3_bind_blob64(*c.sqlite3_stmt, c_int, [*]const u8, u64, destructor: isize) c_int;
 
 pub const Db = struct {
     handle: *c.sqlite3,
@@ -220,8 +223,8 @@ fn check(rc: c_int) Error!void {
 
 fn bindBytes(stmt: *c.sqlite3_stmt, index: c_int, bytes: []const u8, kind: enum { text, blob }) c_int {
     return switch (kind) {
-        .text => c.sqlite3_bind_text64(stmt, index, bytes.ptr, bytes.len, transient, c.SQLITE_UTF8),
-        .blob => c.sqlite3_bind_blob64(stmt, index, bytes.ptr, bytes.len, transient),
+        .text => sqlite3_bind_text64(stmt, index, bytes.ptr, bytes.len, transient, c.SQLITE_UTF8),
+        .blob => sqlite3_bind_blob64(stmt, index, bytes.ptr, bytes.len, transient),
     };
 }
 
