@@ -1662,7 +1662,14 @@ pub const UI = struct {
     fn keybindingsStr(app: *App) []const u8 {
         // Context-aware keybindings based on cursor position and mode
         return switch (app.mode) {
-            .normal => if (app.state.sidebar.open and app.state.sidebar.visible) "j/k:Move  |  Tab:PRs  |  ? for help" else "j/k:Move  |  ? for help",
+            .normal => blk: {
+                const in_review = pr.review_controller.isActive(&app.state.review);
+                if (in_review and app.state.conversation.showing) break :blk "j/k:Move  |  Enter:Thread in diff  |  gc/Esc:Diff  |  ? for help";
+                const sidebar_shown = app.state.sidebar.open and app.state.sidebar.visible;
+                if (sidebar_shown and in_review) break :blk "j/k:Move  |  Tab:PRs  |  gc:Conversation  |  ? for help";
+                if (sidebar_shown) break :blk "j/k:Move  |  Tab:PRs  |  ? for help";
+                break :blk "j/k:Move  |  ? for help";
+            },
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
                     break :blk switch (input.vim.vim_mode) {

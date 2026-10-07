@@ -19,6 +19,8 @@ const surface_controller = review.surface_controller;
 const thread_block = review.thread_block;
 const comment_block = review.comment_block;
 const description_block = review.description_block;
+const conversation_render = review.conversation_render;
+const timeline = review.conversation_timeline;
 const thread_hint = review.thread_hint;
 const harness = review.harness;
 const snapshot = review.snapshot;
@@ -452,6 +454,113 @@ test "snapshot: pr_description_status" {
             .status = .{ .reviews = &status_reviews, .checks = &status_checks },
         },
     });
+}
+
+// =============================================================================
+// Conversation screen
+// =============================================================================
+
+fn conversationView(entries: []const timeline.Entry) conversation_render.View {
+    return .{ .number = 42, .title = "Add cache", .author = "alice", .status = null, .description = &.{}, .placeholder = "No description.", .entries = entries };
+}
+
+fn conversationRowText(arena: std.mem.Allocator, row: conversation_render.Row) ![]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    for (row.segments) |seg| try text.appendSlice(arena, seg.text);
+    return text.items;
+}
+
+test "conversation layout: an empty conversation says so" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const rows = try conversation_render.layout(arena.allocator(), .{ .view = conversationView(&.{}), .width = 60 });
+
+    try testing.expectEqualStrings("    No comments yet.", try conversationRowText(arena.allocator(), rows[rows.len - 1]));
+}
+
+test "conversation layout: every row of a thread entry carries its thread index" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const entries = [_]timeline.Entry{
+        .{ .at = "2025-01-01T09:30:00Z", .author = "bob", .body = "first", .kind = .comment },
+        .{ .at = "2025-01-02T10:00:00Z", .author = "dave", .body = "nit", .kind = .{ .thread = .{ .index = 3, .path = "src/x.zig", .line = 42, .replies = 1, .resolved = false, .outdated = false } } },
+    };
+
+    const rows = try conversation_render.layout(arena.allocator(), .{ .view = conversationView(&entries), .width = 60 });
+
+    const header = rows[rows.len - 3];
+    try testing.expectEqualStrings(" ▸ dave on src/x.zig:42 · 1 reply · 2025-01-02 10:00", try conversationRowText(arena.allocator(), header));
+    try testing.expectEqual(@as(?usize, 3), header.thread);
+    try testing.expectEqual(@as(?usize, 3), rows[rows.len - 2].thread);
+    try testing.expectEqual(@as(?usize, null), rows[rows.len - 4].thread);
+}
+
+test "conversation layout: an approval without a body is a single header row" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const entries = [_]timeline.Entry{.{ .at = "2025-01-02T10:00:00Z", .author = "carol", .body = "", .kind = .{ .review = .approved } }};
+
+    const rows = try conversation_render.layout(arena.allocator(), .{ .view = conversationView(&entries), .width = 60 });
+
+    try testing.expectEqualStrings(" ✓ carol approved · 2025-01-02 10:00", try conversationRowText(arena.allocator(), rows[rows.len - 2]));
+    try testing.expectEqual(@as(usize, 0), rows[rows.len - 1].segments.len);
+}
+
+test "gc: Enter on a code thread returns to the diff with the cursor on it" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    try surface_controller.enterReviewDiff(app.surfaceCtx(), .{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    var ctx = try harness.createTestContext(allocator, 80, 30);
+    defer ctx.deinit();
+
+    try app.handleKey(.{ .codepoint = 'g' });
+    try app.handleKey(.{ .codepoint = 'c' });
+    try app.handleKey(.{ .codepoint = 'G' });
+    try review.frame.render(&app, ctx.window());
+    try app.handleKey(.{ .codepoint = vaxis.Key.enter });
+
+    try testing.expect(!app.state.conversation.showing);
+    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line).?;
+    try testing.expectEqual(@as(usize, 0), record.line_type.review_thread.thread_idx);
+}
+
+test "gc: with no PR open the diff stays" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+
+    try app.handleKey(.{ .codepoint = 'g' });
+    try app.handleKey(.{ .codepoint = 'c' });
+
+    try testing.expect(!app.state.conversation.showing);
+}
+
+test "snapshot: pr_conversation" {
+    const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const entries = [_]timeline.Entry{
+        .{ .at = "2025-01-01T09:30:00Z", .author = "bob", .body = "Can we keep the old cache behind a flag?", .kind = .comment },
+        .{ .at = "2025-01-02T10:00:00Z", .author = "carol", .body = "", .kind = .{ .review = .approved } },
+        .{ .at = "2025-01-02T11:15:00Z", .author = "dave", .body = "This allocates per call; use the `arena`.", .kind = .{ .thread = .{ .index = 0, .path = "src/cache.zig", .line = 42, .replies = 2, .resolved = true, .outdated = false } } },
+        .{ .at = "2025-01-03T08:00:00Z", .author = "erin", .body = "- tests are missing\n- docs need an update", .kind = .{ .review = .changes_requested } },
+    };
+    var view = conversationView(&entries);
+    view.description = try review.description.layout(arena.allocator(), "Adds an **LRU** cache in front of the store.");
+    view.status = .{ .reviews = &status_reviews, .checks = &status_checks };
+    const rows = try conversation_render.layout(arena.allocator(), .{ .view = view, .width = 80 });
+
+    var ctx = try harness.createTestContext(allocator, 80, 30);
+    defer ctx.deinit();
+    conversation_render.draw(ctx.window(), .{ .rows = rows, .cursor = 9, .scroll = 0, .frame_allocator = ctx.frameAllocator() });
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "pr_conversation", text);
 }
 
 test "snapshot: pr_description_status_collapsed_no_reviews" {

@@ -16,6 +16,10 @@ const sidebar_controller = @import("../pr/sidebar/controller.zig");
 const sidebar_layout = @import("../pr/sidebar/layout.zig");
 const sidebar_render = @import("../pr/sidebar/render.zig");
 const scroll_region = @import("scroll_region.zig");
+const review_controller = @import("../pr/review_controller.zig");
+const conversation_state = @import("../pr/conversation/state.zig");
+const conversation_timeline = @import("../pr/conversation/timeline.zig");
+const conversation_render = @import("../pr/conversation/render.zig");
 
 const App = @import("../app.zig").App;
 const skim_io = @import("skim_io");
@@ -612,10 +616,37 @@ fn surfaceSplit(app: *const App, width: u16) sidebar_layout.Split {
 }
 
 fn renderContent(app: *App, win: vaxis.Window) !void {
+    if (app.state.conversation.showing and review_controller.isActive(&app.state.review)) return renderConversation(app, win);
     switch (app.state.view_mode) {
         .unified => try UnifiedRenderer.renderContent(app, win),
         .side_by_side => try SideBySideRenderer.renderContent(app, win),
     }
+}
+
+/// The Conversation screen (`gc`) in place of the diff. Laid out every frame:
+/// it is a handful of comments, and the session can change under it.
+fn renderConversation(app: *App, win: vaxis.Window) !void {
+    const review = &app.state.review;
+    const conversation = &app.state.conversation;
+    const arena = app.frameSegmentAllocator();
+    const entries = try conversation_timeline.build(arena, .{
+        .comments = review.comments.items,
+        .reviews = review.reviews.items,
+        .threads = review.threads.items,
+    });
+    const rows = try conversation_render.layout(arena, .{ .view = .{
+        .number = review.number,
+        .title = review.title,
+        .author = review.author,
+        .status = if (review.data_unavailable) null else .{ .reviews = review.reviews.items, .checks = review.checks.items },
+        .description = review.description_lines,
+        .placeholder = review_controller.descriptionPlaceholder(review),
+        .entries = entries,
+    }, .width = win.width });
+    conversation_state.follow(conversation, review.number);
+    conversation_state.clamp(conversation, .{ .rows = rows.len, .visible = win.height });
+    conversation.cursor_thread = rows[conversation.cursor].thread;
+    conversation_render.draw(win, .{ .rows = rows, .cursor = conversation.cursor, .scroll = conversation.scroll, .frame_allocator = arena });
 }
 
 // Generate colored segments for a line of text using syntax highlights

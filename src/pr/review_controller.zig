@@ -351,6 +351,7 @@ pub const ReviewSession = struct {
     // lists themselves are allocator-managed so they can be reused across refetches.
     threads: std.ArrayList(SessionThread) = .empty,
     reviews: std.ArrayList(review_parse.Review) = .empty,
+    comments: std.ArrayList(review_parse.IssueComment) = .empty,
     checks: std.ArrayList(review_parse.CheckRun) = .empty,
 
     // Derived render placement of `threads` (AD-4: recomputed by the App on every
@@ -698,6 +699,7 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
 
     self.threads.clearRetainingCapacity();
     self.reviews.clearRetainingCapacity();
+    self.comments.clearRetainingCapacity();
     self.checks.clearRetainingCapacity();
 
     for (d.threads) |t| {
@@ -740,6 +742,15 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
             .state = r.state,
             .body = try a.dupe(u8, r.body),
             .submitted_at = try a.dupe(u8, r.submitted_at),
+        });
+    }
+
+    for (d.comments) |c| {
+        try self.comments.append(allocator, .{
+            .id = try a.dupe(u8, c.id),
+            .author = try a.dupe(u8, c.author),
+            .body = try a.dupe(u8, c.body),
+            .created_at = try a.dupe(u8, c.created_at),
         });
     }
 
@@ -1495,6 +1506,7 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     self.expanded_threads.deinit(allocator);
     self.threads.deinit(allocator);
     self.reviews.deinit(allocator);
+    self.comments.deinit(allocator);
     self.checks.deinit(allocator);
 }
 
@@ -1724,6 +1736,7 @@ fn clearData(self: *ReviewSession, allocator: Allocator) void {
     self.posted_review_id = null;
     self.threads.clearRetainingCapacity();
     self.reviews.clearRetainingCapacity();
+    self.comments.clearRetainingCapacity();
     self.checks.clearRetainingCapacity();
     self.pr_node_id = "";
     self.head_ref_oid = "";
@@ -2719,6 +2732,9 @@ const canned_payload =
     \\"statusCheckRollup":{"state":"SUCCESS"},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS","contexts":{"pageInfo":{"hasNextPage":false},"nodes":[
     \\{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}
     \\]}}}}]},
+    \\"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+    \\{"id":"IC_1","author":{"login":"octocat"},"body":"ready for review","createdAt":"2024-12-31T00:00:00Z"}
+    \\]},
     \\"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[
     \\{"id":"PRR_1","state":"APPROVED","author":{"login":"mlugg"},"body":"lgtm","submittedAt":"2025-01-01T00:00:00Z"}
     \\]},
@@ -2783,6 +2799,8 @@ test "applyFetchedData: deep copies survive freeing the source arena" {
 
     try testing.expectEqual(@as(usize, 1), session.reviews.items.len);
     try testing.expectEqualStrings("mlugg", session.reviews.items[0].author);
+    try testing.expectEqual(@as(usize, 1), session.comments.items.len);
+    try testing.expectEqualStrings("ready for review", session.comments.items[0].body);
     try testing.expectEqual(@as(usize, 1), session.checks.items.len);
     try testing.expectEqualStrings("build", session.checks.items[0].name);
 }

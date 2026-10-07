@@ -46,6 +46,16 @@ pub const StatusSource = struct {
     checks: []const review_parse.CheckRun,
 };
 
+/// One wrapped row of a body line: the lead (indent + list marker, or the
+/// matching blank run on continuation rows) and the styled content after it.
+pub const PlannedRow = struct {
+    lead: []const u8,
+    lead_style: vaxis.Style,
+    pieces: []const vaxis.Cell.Segment,
+    /// Background painted across the whole content column (code blocks).
+    fill_bg: ?vaxis.Color = null,
+};
+
 /// Narrowest content column; below this rows clip instead of wrapping
 /// every word onto its own row.
 const min_inner_width = 12;
@@ -107,6 +117,18 @@ pub fn drawRow(win: vaxis.Window, params: struct {
     };
 }
 
+/// Rows for one markdown display line wrapped to `inner_width`, styled as the
+/// description body is. The Conversation screen renders comment bodies with it.
+pub fn planMarkdownLine(arena: Allocator, params: struct { line: description.Line, inner_width: usize }) ![]PlannedRow {
+    return planLine(arena, .{ .line = params.line, .inner_width = params.inner_width });
+}
+
+/// The status row's segments: approvals, change requests, and the checks
+/// tally (see `statusSegments`).
+pub fn statusRow(arena: Allocator, source: StatusSource) ![]const vaxis.Cell.Segment {
+    return statusSegments(arena, source);
+}
+
 const DrawContext = struct {
     win: vaxis.Window,
     start_row: usize,
@@ -141,16 +163,6 @@ const DrawContext = struct {
             .style = params.style,
         });
     }
-};
-
-/// One wrapped row of a body line: the lead (indent + list marker, or the
-/// matching blank run on continuation rows) and the styled content after it.
-const PlannedRow = struct {
-    lead: []const u8,
-    lead_style: vaxis.Style,
-    pieces: []const vaxis.Cell.Segment,
-    /// Background painted across the whole content column (code blocks).
-    fill_bg: ?vaxis.Color = null,
 };
 
 const Styles = struct {
@@ -311,8 +323,11 @@ fn planBodyRows(arena: Allocator, params: struct {
         return planSingle(arena, .{ .text = text, .style = .{ .fg = Color.dim_gray, .italic = true } });
     }
     if (params.line_idx >= view.lines.len) return planSingle(arena, .{ .text = "", .style = .{} });
+    return planLine(arena, .{ .line = view.lines[params.line_idx], .inner_width = params.inner_width });
+}
 
-    const line = view.lines[params.line_idx];
+fn planLine(arena: Allocator, params: struct { line: description.Line, inner_width: usize }) ![]PlannedRow {
+    const line = params.line;
     switch (line.kind) {
         .blank => return planSingle(arena, .{ .text = "", .style = .{} }),
         .rule => {

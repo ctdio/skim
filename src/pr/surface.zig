@@ -110,6 +110,16 @@ pub const SeenParams = struct {
     now: i64,
 };
 
+pub const MyReviewParams = struct {
+    allocator: Allocator,
+    number: u32,
+    sidebar: *SidebarState,
+    /// GitHub review state, e.g. "APPROVED".
+    state: []const u8,
+    /// Commit the review was submitted against.
+    oid: []const u8,
+};
+
 pub const PlanParams = struct {
     allocator: Allocator,
     sidebar: *const SidebarState,
@@ -478,6 +488,14 @@ pub fn toggleSeen(surface: *Surface, params: SeenParams) void {
     };
 }
 
+/// Show a review the viewer just submitted in the sidebar without waiting
+/// for the sync to pick it up.
+pub fn recordMyReview(surface: *Surface, params: MyReviewParams) void {
+    writeMyReview(surface, params) catch |err| {
+        std.log.warn("pr surface: recording review on #{d} failed: {}", .{ params.number, err });
+    };
+}
+
 pub fn seenComparison(surface: *Surface, params: struct { sidebar: *const SidebarState, number: u32 }) SeenComparison {
     const record = sidebar_controller.recordByNumber(params.sidebar, params.number) orelse return .unchanged;
     const seen = record.seen_head_oid orelse return .unchanged;
@@ -761,6 +779,12 @@ fn writeSeen(surface: *Surface, params: SeenParams) !void {
         .merge_base_oid = &merge_base,
         .now = params.now,
     });
+    try reload(surface, .{ .allocator = params.allocator, .sidebar = params.sidebar });
+}
+
+fn writeMyReview(surface: *Surface, params: MyReviewParams) !void {
+    const db = if (surface.store) |*s| s else return;
+    try db.setMyReview(.{ .repo_id = surface.repo_id, .number = params.number, .state = params.state, .oid = params.oid });
     try reload(surface, .{ .allocator = params.allocator, .sidebar = params.sidebar });
 }
 

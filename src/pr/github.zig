@@ -204,6 +204,19 @@ pub const review_query =
     \\          }
     \\        }
     \\      }
+    \\      comments(last: 50) {
+    \\        pageInfo {
+    \\          hasPreviousPage
+    \\        }
+    \\        nodes {
+    \\          id
+    \\          author {
+    \\            login
+    \\          }
+    \\          body
+    \\          createdAt
+    \\        }
+    \\      }
     \\      reviews(first: 50) {
     \\        pageInfo {
     \\          hasNextPage

@@ -9,9 +9,12 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const clipboard = @import("../clipboard.zig");
+const conversation_state = @import("../pr/conversation/state.zig");
 const flip = @import("../pr/flip.zig");
 const flip_controller = @import("../pr/flip_controller.zig");
 const Layout = @import("../rendering/common.zig").Layout;
+const Navigation = @import("../navigation.zig").Navigation;
+const review_controller = @import("../pr/review_controller.zig");
 const pr_surface = if (@import("../platform.zig").is_web) @import("../pr/surface_stub.zig") else @import("../pr/surface.zig");
 const sidebar_controller = @import("../pr/sidebar/controller.zig");
 const sidebar_render = @import("../pr/sidebar/render.zig");
@@ -37,6 +40,11 @@ pub fn handleKey(app: *App, key: Key) !void {
         sb.pending_g = false;
         if (key.codepoint == 'g' and !key.mods.ctrl) {
             sidebar_controller.moveToEdge(sb, .top);
+            return;
+        }
+        if (key.codepoint == 'c' and !key.mods.ctrl) {
+            toggleConversation(app);
+            if (app.state.conversation.showing) focusDiff(app);
             return;
         }
     }
@@ -120,6 +128,67 @@ pub fn handleDiffFocusKey(app: *App, key: Key) !bool {
         else => return false,
     }
     app.needs_render = true;
+    return true;
+}
+
+/// `gc`: the Conversation screen in place of the diff, or the diff again.
+pub fn toggleConversation(app: *App) void {
+    app.needs_render = true;
+    if (!review_controller.isActive(&app.state.review)) return app.showStatusError("no PR conversation to show");
+    conversation_state.toggle(&app.state.conversation);
+}
+
+/// Keys while the Conversation screen replaces the diff. Returns true when
+/// consumed; app-wide keys (help, palette, info, sync, quit, the sidebar and
+/// window chords) fall through to normal mode, and diff keys are swallowed.
+/// Called first by normal_mode.
+pub fn handleConversationKey(app: *App, key: Key) !bool {
+    const conversation = &app.state.conversation;
+    if (!conversation.showing) return false;
+    if (!review_controller.isActive(&app.state.review)) {
+        conversation.showing = false;
+        return false;
+    }
+    if (normalPrefixPending(app)) return false;
+    app.needs_render = true;
+    conversation_state.follow(conversation, app.state.review.number);
+
+    if (conversation.pending_g) {
+        conversation.pending_g = false;
+        if (!key.mods.ctrl) switch (key.codepoint) {
+            'g' => {
+                conversation_state.moveToEdge(conversation, .top);
+                return true;
+            },
+            'c' => {
+                conversation_state.toggle(conversation);
+                return true;
+            },
+            else => {},
+        };
+    }
+
+    const half_page: isize = @intCast(@max(conversation.visible / 2, 1));
+    if (key.mods.ctrl) {
+        switch (key.codepoint) {
+            'd' => conversation_state.move(conversation, half_page),
+            'u' => conversation_state.move(conversation, -half_page),
+            else => return false,
+        }
+        return true;
+    }
+    switch (key.codepoint) {
+        'j', Key.down => conversation_state.move(conversation, 1),
+        'k', Key.up => conversation_state.move(conversation, -1),
+        Key.page_down => conversation_state.move(conversation, half_page * 2),
+        Key.page_up => conversation_state.move(conversation, -half_page * 2),
+        'g' => conversation.pending_g = true,
+        'G' => conversation_state.moveToEdge(conversation, .bottom),
+        Key.enter => jumpToThread(app),
+        Key.escape => conversation_state.toggle(conversation),
+        '?', ':', 'i', 'r', 'R', 'c', 'm', 'q', Key.tab => return false,
+        else => {},
+    }
     return true;
 }
 
@@ -251,6 +320,28 @@ fn switchView(app: *App, params: struct { number: u32, view: flip.DiffView }) vo
 fn normalPrefixPending(app: *const App) bool {
     const state = &app.state;
     return state.pending_z or state.pending_g or state.pending_bracket or state.pending_close_bracket or state.pending_find != null or state.pending_ctrl_w;
+}
+
+/// `Enter` on a code thread: back to the diff with the cursor on the thread.
+fn jumpToThread(app: *App) void {
+    const thread_idx = app.state.conversation.cursor_thread orelse return;
+    const total = app.getTotalGlobalLines();
+    var line: usize = 0;
+    while (line < total) : (line += 1) {
+        const record = app.state.line_map.getLineRecord(line) orelse continue;
+        switch (record.line_type) {
+            .review_thread => |thread| if (thread.thread_idx == thread_idx) {
+                conversation_state.toggle(&app.state.conversation);
+                app.state.global_cursor_line = line;
+                app.state.cursor_column = 0;
+                Navigation.centerViewportOnCursor(app);
+                app.updateCurrentFileAndTriggerHighlighting();
+                return;
+            },
+            else => {},
+        }
+    }
+    app.showStatusError("thread is not in the diff (folded or filtered out)");
 }
 
 /// Focus the diff. A no-op with nothing loaded: normal mode would drive the

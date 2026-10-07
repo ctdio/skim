@@ -18,6 +18,8 @@ pub const thread_block = @import("rendering/thread_block.zig");
 pub const comment_block = @import("rendering/comment_block.zig");
 pub const description_block = @import("rendering/description_block.zig");
 pub const description = @import("pr/description.zig");
+pub const conversation_timeline = @import("pr/conversation/timeline.zig");
+pub const conversation_render = @import("pr/conversation/render.zig");
 pub const widthUtil = @import("rendering/width.zig");
 pub const thread_hint = @import("pr/thread_hint.zig");
 pub const harness = @import("testing/harness.zig");
@@ -28,6 +30,7 @@ pub const snapshot = @import("testing/snapshot.zig");
 // review render tests need a minimal `App` value carrying an `active_comment_input`.
 pub const App = @import("app.zig").App;
 pub const RenderUtils = @import("rendering/utils.zig").RenderUtils;
+pub const frame = @import("rendering/frame.zig");
 pub const SideBySideRenderer = @import("rendering/side_by_side.zig").SideBySideRenderer;
 pub const CommentEditor = @import("comments/editor.zig").CommentEditor;
 pub const SyntaxHighlighter = @import("highlighting/core.zig").SyntaxHighlighter;

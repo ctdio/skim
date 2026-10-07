@@ -58,6 +58,14 @@ pub const Review = struct {
     submitted_at: []const u8,
 };
 
+/// A top-level PR comment (GitHub's Conversation tab), not tied to a line.
+pub const IssueComment = struct {
+    id: []const u8,
+    author: []const u8, // "" for a deleted account
+    body: []const u8,
+    created_at: []const u8,
+};
+
 pub const CheckRun = struct {
     name: []const u8,
     status: []const u8,
@@ -78,6 +86,8 @@ pub const PrDetails = struct {
     rollup: RollupState,
     checks: []CheckRun,
     reviews: []Review,
+    /// Oldest first; the latest 50.
+    comments: []IssueComment,
     threads: []ReviewThread,
     viewer_login: []const u8,
     pending_review_id: ?[]const u8, // viewer's PENDING review, if any
@@ -120,6 +130,7 @@ pub fn parsePrDetails(allocator: std.mem.Allocator, json_bytes: []const u8) !PrR
 
     const checks = try parseChecks(a, pull_request, &truncated);
     const reviews = try parseReviews(a, pull_request, &truncated);
+    const comments = try parseIssueComments(a, pull_request, &truncated);
     const threads = try parseThreads(a, pull_request, viewer_login, &truncated);
     const pending_review_id = pendingReviewId(reviews, viewer_login);
 
@@ -137,6 +148,7 @@ pub fn parsePrDetails(allocator: std.mem.Allocator, json_bytes: []const u8) !PrR
         .rollup = parseRollup(pull_request),
         .checks = checks,
         .reviews = reviews,
+        .comments = comments,
         .threads = threads,
         .viewer_login = try dupe(a, viewer_login),
         .pending_review_id = if (pending_review_id) |id| try dupe(a, id) else null,
@@ -467,6 +479,30 @@ fn parseReviews(a: std.mem.Allocator, pull_request: std.json.ObjectMap, truncate
     return list[0..count];
 }
 
+/// Fetched with `last:`, so older comments left out show as a previous page.
+fn parseIssueComments(a: std.mem.Allocator, pull_request: std.json.ObjectMap, truncated: *bool) ![]IssueComment {
+    const comments = objField(pull_request, "comments") orelse return &.{};
+    if (objField(comments, "pageInfo")) |page_info| {
+        if (boolField(page_info, "hasPreviousPage")) truncated.* = true;
+    }
+    const nodes = arrField(comments, "nodes") orelse return &.{};
+
+    var list = try a.alloc(IssueComment, nodes.len);
+    var count: usize = 0;
+    for (nodes) |node| {
+        if (node != .object) continue;
+        const obj = node.object;
+        list[count] = .{
+            .id = try dupe(a, strField(obj, "id") orelse ""),
+            .author = try dupe(a, loginField(obj, "author")),
+            .body = try dupe(a, strField(obj, "body") orelse ""),
+            .created_at = try dupe(a, strField(obj, "createdAt") orelse ""),
+        };
+        count += 1;
+    }
+    return list[0..count];
+}
+
 fn parseThreads(a: std.mem.Allocator, pull_request: std.json.ObjectMap, viewer_login: []const u8, truncated: *bool) ![]ReviewThread {
     const review_threads = objField(pull_request, "reviewThreads") orelse return &.{};
     if (pageHasNext(review_threads)) truncated.* = true;
@@ -622,6 +658,10 @@ const full_payload =
     \\{"__typename":"CheckRun","name":"x86_64-linux-debug","status":"COMPLETED","conclusion":"SUCCESS"},
     \\{"__typename":"StatusContext","context":"legacy-ci","state":"SUCCESS"}
     \\]}}}}]},
+    \\"comments":{"pageInfo":{"hasPreviousPage":false},"nodes":[
+    \\{"id":"IC_1","author":{"login":"andrewrk"},"body":"Thanks, could you add a test?","createdAt":"2025-11-22T20:00:00Z"},
+    \\{"id":"IC_2","author":null,"body":"ghost","createdAt":"2025-11-23T10:00:00Z"}
+    \\]},
     \\"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[
     \\{"id":"PRR_A","state":"COMMENTED","author":{"login":"IOKG04"},"body":"","submittedAt":"2025-11-22T22:14:26Z"},
     \\{"id":"PRR_B","state":"COMMENTED","author":{"login":"meowjesty"},"body":"","submittedAt":"2025-11-23T01:19:27Z"},
@@ -671,6 +711,28 @@ test "parsePrDetails: checks map both CheckRun and StatusContext" {
     try testing.expectEqualStrings("legacy-ci", checks[1].name);
     try testing.expectEqualStrings("SUCCESS", checks[1].status);
     try testing.expectEqualStrings("SUCCESS", checks[1].conclusion);
+}
+
+test "parsePrDetails: top-level comments parsed oldest first" {
+    var data = try parsePrDetails(testing.allocator, full_payload);
+    defer data.deinit();
+    const comments = data.details.comments;
+
+    try testing.expectEqual(@as(usize, 2), comments.len);
+    try testing.expectEqualStrings("andrewrk", comments[0].author);
+    try testing.expectEqualStrings("Thanks, could you add a test?", comments[0].body);
+    try testing.expectEqualStrings("2025-11-22T20:00:00Z", comments[0].created_at);
+    try testing.expectEqualStrings("", comments[1].author);
+}
+
+test "parsePrDetails: more top-level comments than fetched marks the payload truncated" {
+    const payload =
+        \\{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasPreviousPage":true},"nodes":[]}}}}}
+    ;
+    var data = try parsePrDetails(testing.allocator, payload);
+    defer data.deinit();
+
+    try testing.expect(data.details.truncated);
 }
 
 test "parsePrDetails: reviews parsed with states" {

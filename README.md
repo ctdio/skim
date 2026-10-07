@@ -164,6 +164,14 @@ The diff shows one of two views of the PR:
 `i` opens the PR info panel: every check, every review with its first line, and
 the description, scrollable.
 
+`gc` (from the diff or the sidebar) swaps the diff for the PR's Conversation:
+the title and status row, the description, then every top-level comment,
+review, and code thread in time order, each with its body rendered as
+markdown. `j` / `k`, `Ctrl-d` / `Ctrl-u`, and `gg` / `G` scroll it; `Enter` on
+a code thread returns to the diff with the cursor on that thread; `gc` or `Esc`
+returns to the diff. The Conversation is read-only: reply to code threads from
+the diff.
+
 #### Sidebar Keys
 
 | Key                      | Action                                                                                                          |
@@ -353,6 +361,7 @@ Available when a pull request is open in the diff (`skim pr`). Keys marked _(on 
 | `x` _(on thread)_      | Toggle resolve / unresolve on the thread                  |
 | `R`                    | Open submit-review dialog (verdict + body)                |
 | `i`                    | Toggle read-only PR info panel                            |
+| `gc`                   | Show the PR conversation in place of the diff, or back    |
 | `o` _(on description)_ | Fold / expand the PR description block                    |
 | `r`                    | Refresh diff and refetch review threads                   |
 

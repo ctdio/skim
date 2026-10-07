@@ -8,7 +8,7 @@ const sqlite = @import("sqlite.zig");
 pub const MigrateError = sqlite.Error || error{SchemaTooNew};
 
 /// Index i holds the SQL that moves user_version from i to i+1.
-pub const steps = [_][:0]const u8{migration_1};
+pub const steps = [_][:0]const u8{ migration_1, migration_2 };
 
 pub const current_version: u32 = steps.len;
 
@@ -150,6 +150,13 @@ const migration_1 =
     \\CREATE INDEX local_note_by_pr ON local_note(repo_id, number);
 ;
 
+/// Migration 2: the review query gained top-level PR comments. Cached
+/// responses are keyed only by `pr.updated_at`, so ones fetched before would
+/// never show them; dropping them makes the next open refetch.
+const migration_2 =
+    \\DELETE FROM thread_cache;
+;
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -227,6 +234,22 @@ test "diff_cache and thread_cache keep their blob column last" {
 
     try testing.expectEqualStrings("bytes", diff_last);
     try testing.expectEqualStrings("json", thread_last);
+}
+
+test "migration 2 drops review responses cached by migration 1's schema" {
+    var db = try sqlite.Db.open(":memory:", .{});
+    defer db.close();
+    try db.exec(steps[0]);
+    try db.exec("PRAGMA user_version = 1");
+    try db.exec("INSERT INTO repo(id, key, owner, name) VALUES(1, 'k', 'o', 'n')");
+    try db.exec("INSERT INTO thread_cache(repo_id, number, pr_updated_at, fetched_at, json) VALUES(1, 7, 't', 0, x'00')");
+
+    try migrate(&db);
+
+    var stmt = try db.prepare("SELECT count(*) FROM thread_cache");
+    defer stmt.finalize();
+    try testing.expect(try stmt.step());
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
 }
 
 test "migrate refuses a newer schema" {

@@ -34,6 +34,9 @@ const accent = Style{ .fg = .{ .index = 6 } }; // cyan
 const danger = Style{ .fg = .{ .index = 1 } }; // red
 const ok_green = Style{ .fg = .{ .index = 2 } };
 const warn_yellow = Style{ .fg = .{ .index = 3 } };
+// Submit-dialog editor gutter: a bar plus one space of padding before the text.
+const gutter = " ▎ ";
+const gutter_width: usize = 3;
 
 pub const SubmitView = struct {
     verdict: Verdict,
@@ -97,24 +100,32 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
     title.text(" Submit review");
     if (view.submitting) title.styledText("  submitting…", muted);
 
-    // Verdict selector: the active verdict is marked and highlighted.
+    var rule = LineWriter.init(.{ .win = win, .row = 1, .style = muted, .bg = view.bg });
+    var col: u16 = 0;
+    while (col < win.width) : (col += 1) rule.styledText("─", muted);
+
     var sel = LineWriter.init(.{ .win = win, .row = 2, .bg = view.bg });
     sel.styledText(" ", .{});
-    drawVerdictOption(&sel, "Comment", view.verdict == .comment);
+    drawVerdictOption(&sel, .comment, view.verdict);
     sel.styledText("   ", .{});
-    drawVerdictOption(&sel, "Approve", view.verdict == .approve);
+    drawVerdictOption(&sel, .approve, view.verdict);
     sel.styledText("   ", .{});
-    drawVerdictOption(&sel, "Request changes", view.verdict == .request_changes);
+    drawVerdictOption(&sel, .request_changes, view.verdict);
 
-    // Summary of what the submit publishes.
+    // Counts are the only facts on this row, so they carry the emphasis and
+    // the connecting words stay muted.
+    const strong = Style{ .bold = true };
     var summary = LineWriter.init(.{ .win = win, .row = 3, .style = muted, .bg = view.bg });
     summary.styledText(" ", muted);
-    summary.styledUnsigned(view.draft_count, muted);
+    summary.styledUnsigned(view.draft_count, strong);
     summary.styledText(if (view.draft_count == 1) " draft comment · " else " draft comments · ", muted);
-    summary.styledUnsigned(view.counts.unresolved, muted);
+    summary.styledUnsigned(view.counts.unresolved, if (view.counts.unresolved > 0) warn_yellow else strong);
     summary.styledText("/", muted);
-    summary.styledUnsigned(view.counts.total, muted);
+    summary.styledUnsigned(view.counts.total, strong);
     summary.styledText(" threads unresolved", muted);
+
+    var label = LineWriter.init(.{ .win = win, .row = 4, .style = muted, .bg = view.bg });
+    label.styledText(" Summary", .{ .fg = .{ .index = 8 }, .bold = true });
 
     // Body editor (multi-line, scrolls to keep the cursor visible; clipped to the
     // available rows above the footer).
@@ -143,9 +154,16 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
 
     var footer = LineWriter.init(.{ .win = win, .row = footer_row, .style = muted, .bg = view.bg });
     if (view.confirm_discard) {
-        footer.styledText(" ^D:Discard again  |  Any key:Cancel", warn_yellow);
+        footer.styledText(" ^D", .{ .fg = .{ .index = 3 }, .bold = true });
+        footer.styledText(" discard again   ", warn_yellow);
+        footer.styledText("any key", .{ .fg = .{ .index = 3 }, .bold = true });
+        footer.styledText(" keeps editing", warn_yellow);
     } else {
-        footer.styledText(" Tab:Verdict  |  ^S/Enter:Submit  |  ^D:Discard  |  ESC:Cancel", muted);
+        footer.styledText(" ", muted);
+        drawKeyHint(&footer, "Tab", "verdict");
+        drawKeyHint(&footer, "^S/Enter", "submit");
+        drawKeyHint(&footer, "^D", "discard");
+        drawKeyHint(&footer, "Esc", "cancel");
     }
 }
 
@@ -230,28 +248,46 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
 fn emptyBodyPlaceholder(verdict: Verdict, draft_count: usize) []const u8 {
     if (draft_count > 0) {
         return switch (verdict) {
-            .comment => " (no summary — ^S submits the drafts)",
-            .approve => " (no summary — ^S approves and submits the drafts)",
-            .request_changes => " (no summary — ^S requests changes and submits the drafts)",
+            .comment => "(no summary — ^S submits the drafts)",
+            .approve => "(no summary — ^S approves and submits the drafts)",
+            .request_changes => "(no summary — ^S requests changes and submits the drafts)",
         };
     }
     return switch (verdict) {
-        .comment => " (add a summary or a draft comment to submit)",
-        .approve => " (no summary — ^S approves this PR)",
-        .request_changes => " (no summary — ^S requests changes on this PR)",
+        .comment => "(add a summary or a draft comment to submit)",
+        .approve => "(no summary — ^S approves this PR)",
+        .request_changes => "(no summary — ^S requests changes on this PR)",
     };
 }
 
-fn drawVerdictOption(writer: *LineWriter, label: []const u8, selected: bool) void {
-    if (selected) {
-        writer.styledText("[", accent);
-        writer.styledText(label, .{ .fg = .{ .index = 6 }, .bold = true });
-        writer.styledText("]", accent);
-    } else {
-        writer.styledText(" ", muted);
+/// Radio-style verdict option. The selected one takes the color of what it does
+/// (approve green, request changes red) so the outcome reads at a glance.
+fn drawVerdictOption(writer: *LineWriter, option: Verdict, selected: Verdict) void {
+    const label = review_controller.verdictLabel(option);
+    if (option != selected) {
+        writer.styledText("○ ", muted);
         writer.styledText(label, muted);
-        writer.styledText(" ", muted);
+        return;
     }
+    var style = verdictStyle(option);
+    style.bold = true;
+    writer.styledText("● ", style);
+    writer.styledText(label, style);
+}
+
+fn verdictStyle(verdict: Verdict) Style {
+    return switch (verdict) {
+        .comment => accent,
+        .approve => ok_green,
+        .request_changes => danger,
+    };
+}
+
+fn drawKeyHint(writer: *LineWriter, key: []const u8, action: []const u8) void {
+    writer.styledText(key, .{ .fg = .{ .index = 6 }, .bold = true });
+    writer.styledText(" ", muted);
+    writer.styledText(action, muted);
+    writer.styledText("   ", muted);
 }
 
 /// Draw the review-body editor into rows `[top, bottom)`. The body scrolls
@@ -260,11 +296,14 @@ fn drawVerdictOption(writer: *LineWriter, label: []const u8, selected: bool) voi
 /// cursor byte offset — mirroring the diff comment editor (rendering/utils.zig).
 fn drawBodyEditor(win: vaxis.Window, view: SubmitView, top: u16, bottom: u16) void {
     const visible_rows: usize = bottom - top; // caller guarantees top < bottom
+    const gutter_style = verdictStyle(view.verdict);
 
     if (view.body.len == 0) {
         var empty = LineWriter.init(.{ .win = win, .row = top, .style = muted, .bg = view.bg });
-        empty.styledText(emptyBodyPlaceholder(view.verdict, view.draft_count), muted);
-        if (view.editing) positionCursor(win, top, 1, view.insert_mode);
+        empty.styledText(gutter, gutter_style);
+        empty.styledText(emptyBodyPlaceholder(view.verdict, view.draft_count), .{ .fg = .{ .index = 8 }, .italic = true });
+        drawGutterRows(win, view.bg, gutter_style, top + 1, bottom);
+        if (view.editing) positionCursor(win, top, gutter_width, view.insert_mode);
         return;
     }
 
@@ -295,14 +334,25 @@ fn drawBodyEditor(win: vaxis.Window, view: SubmitView, top: u16, bottom: u16) vo
         if (idx < scroll) continue;
         if (row >= bottom) break;
         var writer = LineWriter.init(.{ .win = win, .row = row, .bg = view.bg });
-        writer.styledText(" ", .{});
+        writer.styledText(gutter, gutter_style);
         writer.text(line);
         row += 1;
     }
+    drawGutterRows(win, view.bg, gutter_style, row, bottom);
 
     if (view.editing and cursor_row >= scroll) {
         const phys_row: u16 = top + @as(u16, @intCast(cursor_row - scroll));
-        if (phys_row < bottom) positionCursor(win, phys_row, 1 + cursor_col, view.insert_mode);
+        if (phys_row < bottom) positionCursor(win, phys_row, gutter_width + cursor_col, view.insert_mode);
+    }
+}
+
+/// Continue the editor gutter down the empty rows so the input area reads as a
+/// box rather than blank dialog space.
+fn drawGutterRows(win: vaxis.Window, bg: Color, style: Style, from: u16, bottom: u16) void {
+    var row = from;
+    while (row < bottom) : (row += 1) {
+        var writer = LineWriter.init(.{ .win = win, .row = row, .bg = bg });
+        writer.styledText(gutter, style);
     }
 }
 
@@ -563,7 +613,16 @@ fn screenContains(screen: vaxis.Screen, needle: []const u8) bool {
     return false;
 }
 
-test "drawSubmitDialog: lists all three verdicts and brackets the selected one" {
+fn selectedMarkerStyle(screen: vaxis.Screen) Style {
+    var col: u16 = 0;
+    while (col < screen.width) : (col += 1) {
+        const cell = screen.readCell(col, 2) orelse continue;
+        if (std.mem.eql(u8, cell.char.grapheme, "●")) return cell.style;
+    }
+    return .{};
+}
+
+test "drawSubmitDialog: lists all three verdicts and marks the selected one" {
     var ts = try TestScreen.init(60, 12);
     defer ts.deinit();
 
@@ -575,9 +634,30 @@ test "drawSubmitDialog: lists all three verdicts and brackets the selected one" 
     });
 
     try testing.expect(rowContains(ts.screen, 0, "Submit review"));
-    try testing.expect(rowContains(ts.screen, 2, "Comment"));
-    try testing.expect(rowContains(ts.screen, 2, "[Approve]"));
-    try testing.expect(rowContains(ts.screen, 2, "Request changes"));
+    try testing.expect(rowContains(ts.screen, 2, "○ Comment"));
+    try testing.expect(rowContains(ts.screen, 2, "● Approve"));
+    try testing.expect(rowContains(ts.screen, 2, "○ Request changes"));
+}
+
+test "drawSubmitDialog: colors the selected verdict by what it does" {
+    var ts = try TestScreen.init(60, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .approve });
+    try testing.expect(std.meta.eql(selectedMarkerStyle(ts.screen).fg, ok_green.fg));
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .request_changes });
+    try testing.expect(std.meta.eql(selectedMarkerStyle(ts.screen).fg, danger.fg));
+}
+
+test "drawSubmitDialog: separates the title with a rule and labels the summary editor" {
+    var ts = try TestScreen.init(60, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .comment });
+
+    try testing.expect(rowContains(ts.screen, 1, "────"));
+    try testing.expect(rowContains(ts.screen, 4, "Summary"));
 }
 
 test "drawSubmitDialog: summary shows draft count and unresolved/total threads" {
@@ -600,8 +680,10 @@ test "drawSubmitDialog: renders the review body preview" {
 
     drawSubmitDialog(ts.window(), .{ .verdict = .comment, .body = "first line\nsecond line" });
 
-    try testing.expect(rowContains(ts.screen, 5, "first line"));
-    try testing.expect(rowContains(ts.screen, 6, "second line"));
+    try testing.expect(rowContains(ts.screen, 5, "▎ first line"));
+    try testing.expect(rowContains(ts.screen, 6, "▎ second line"));
+    // The gutter runs the full editor height so the input area reads as a box.
+    try testing.expect(rowContains(ts.screen, 9, "▎"));
 }
 
 test "drawSubmitDialog: empty-body approve placeholder names the verdict, not drafts" {
@@ -667,7 +749,7 @@ test "drawSubmitDialog: positions a beam cursor at the editor cursor in insert m
     defer ts.deinit();
 
     // Cursor after "abc" on the first body line: physical row = body_top (5),
-    // physical col = 1 (leading space) + 3 graphemes = 4.
+    // physical col = 3 (gutter) + 3 graphemes = 6.
     drawSubmitDialog(ts.window(), .{
         .verdict = .comment,
         .body = "abc",
@@ -678,7 +760,7 @@ test "drawSubmitDialog: positions a beam cursor at the editor cursor in insert m
 
     try testing.expect(ts.screen.cursor_vis);
     try testing.expectEqual(@as(u16, 5), ts.screen.cursor.row);
-    try testing.expectEqual(@as(u16, 4), ts.screen.cursor.col);
+    try testing.expectEqual(@as(u16, 6), ts.screen.cursor.col);
     try testing.expectEqual(vaxis.Cell.CursorShape.beam, ts.screen.cursor_shape);
 }
 
@@ -745,18 +827,18 @@ test "drawSubmitDialog: armed discard shows the confirm prompt in the footer" {
 
     drawSubmitDialog(ts.window(), .{ .verdict = .comment, .confirm_discard = true });
 
-    try testing.expect(rowContains(ts.screen, 11, "^D:Discard again"));
+    try testing.expect(rowContains(ts.screen, 11, "^D discard again"));
 }
 
 test "drawSubmitDialog: footer hints fit the production popup width without clipping ESC" {
     // Production sizes this popup at desired_width 64 (ui.zig). The footer must
-    // fit so its trailing ESC:Cancel hint is never truncated.
+    // fit so its trailing Esc cancel hint is never truncated.
     var ts = try TestScreen.init(64, 12);
     defer ts.deinit();
 
     drawSubmitDialog(ts.window(), .{ .verdict = .comment });
 
-    try testing.expect(rowContains(ts.screen, 11, "ESC:Cancel"));
+    try testing.expect(rowContains(ts.screen, 11, "Esc cancel"));
 }
 
 test "drawSubmitDialog: fills every cell with the popup background" {

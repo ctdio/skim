@@ -1,0 +1,19 @@
+ #42 Add cache  alice
+ ✓ approved by bob, dave · ✗ changes requested by carol · checks ✓1 ✗1 ●1 (lint)
+
+ Description
+    Adds an LRU cache in front of the store.
+
+ Conversation · 4
+
+ ● bob commented · 2025-01-01 09:30
+    Can we keep the old cache behind a flag?
+
+ ✓ carol approved · 2025-01-02 10:00
+
+ ▸ dave on src/cache.zig:42 · 2 replies · resolved · 2025-01-02 11:15
+    This allocates per call; use the arena.
+
+ ✗ erin requested changes · 2025-01-03 08:00
+    • tests are missing
+    • docs need an update

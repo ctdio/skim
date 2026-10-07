@@ -69,6 +69,15 @@ pub const SeenParams = struct {
     now: i64,
 };
 
+pub const MyReviewParams = struct {
+    repo_id: i64,
+    number: u32,
+    /// GitHub review state, e.g. "APPROVED".
+    state: []const u8,
+    /// Commit the review was submitted against.
+    oid: []const u8,
+};
+
 pub const DiffLookup = struct {
     repo_id: i64,
     key: DiffKey,
@@ -302,6 +311,16 @@ pub const Store = struct {
             stmt.reset();
         }
         try self.db.commit();
+    }
+
+    /// Record a review the viewer just submitted, ahead of the sync that
+    /// confirms it. `hydrated_at_update` is untouched, so the next hydrate of
+    /// the PR (its `updated_at` moved with the review) overwrites this.
+    pub fn setMyReview(self: *Store, params: MyReviewParams) !void {
+        try self.run(
+            \\UPDATE pr SET my_review_state = ?, my_review_oid = ?
+            \\WHERE repo_id = ? AND number = ?
+        , .{ params.state, params.oid, params.repo_id, params.number });
     }
 
     /// Stamp `hydrated_at_update` with each ref's `updated_at`, leaving the
@@ -1493,6 +1512,26 @@ test "applyHydrate ignores unknown numbers" {
 
     try store.applyHydrate(repo_id, &.{hydrateRow(99, "2026-01-01T00:00:00Z")});
     try testing.expectEqual(@as(i64, 0), try queryInt(&store, "SELECT count(*) FROM pr"));
+}
+
+test "setMyReview overwrites the viewer's review and leaves the hydrate stamp alone" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const updated_at = "2026-01-01T00:00:00Z";
+    try store.upsertIndex(repo_id, &.{indexRow(1, updated_at)});
+    try store.applyHydrate(repo_id, &.{hydrateRow(1, updated_at)});
+
+    try store.setMyReview(.{ .repo_id = repo_id, .number = 1, .state = "APPROVED", .oid = oid_d });
+
+    var list = try store.listOpen(testing.allocator, repo_id);
+    defer list.deinit();
+    const got = list.items[0];
+    try testing.expectEqualStrings("APPROVED", got.my_review_state);
+    try testing.expectEqualStrings(oid_d, got.my_review_oid);
+    try testing.expectEqualStrings(updated_at, got.hydrated_at_update.?);
 }
 
 test "markHydrateUnresolved keeps a row out of needsHydrate until its updated_at changes" {

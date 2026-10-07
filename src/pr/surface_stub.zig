@@ -38,6 +38,14 @@ pub const SeenParams = struct {
     now: i64,
 };
 
+pub const MyReviewParams = struct {
+    allocator: Allocator,
+    number: u32,
+    sidebar: *SidebarState,
+    state: []const u8,
+    oid: []const u8,
+};
+
 pub const PlanParams = struct {
     allocator: Allocator,
     sidebar: *const SidebarState,
@@ -153,6 +161,11 @@ pub fn markSeen(surface: *Surface, params: SeenParams) void {
 }
 
 pub fn toggleSeen(surface: *Surface, params: SeenParams) void {
+    _ = surface;
+    _ = params;
+}
+
+pub fn recordMyReview(surface: *Surface, params: MyReviewParams) void {
     _ = surface;
     _ = params;
 }

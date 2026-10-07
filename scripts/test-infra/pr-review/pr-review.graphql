@@ -45,6 +45,19 @@ query ($owner: String!, $name: String!, $number: Int!) {
           }
         }
       }
+      comments(last: 50) {
+        pageInfo {
+          hasPreviousPage
+        }
+        nodes {
+          id
+          author {
+            login
+          }
+          body
+          createdAt
+        }
+      }
       reviews(first: 50) {
         pageInfo {
           hasNextPage

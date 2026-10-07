@@ -12,6 +12,7 @@ const pr_review_mode = @import("pr_review_mode.zig");
 
 /// Handle keyboard input when in normal mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
+    if (try pr_review_mode.handleConversationKey(app, key)) return;
     if (try pr_review_mode.handleDiffFocusKey(app, key)) return;
 
     // Special handling when there are no files (empty menu)
@@ -109,6 +110,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // gY - yank all comments to agent input
         if (key.codepoint == 'Y') {
             try CommentController.yankCommentsToAgent(app);
+            return;
+        }
+        if (key.codepoint == 'c') {
+            pr_review_mode.toggleConversation(app);
             return;
         }
         // Any other key cancels the pending g, but still processes the key below

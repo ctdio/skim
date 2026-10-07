@@ -69,6 +69,7 @@ const codex_mod = @import("codex/codex.zig");
 const pr = @import("pr/pr.zig");
 const pr_surface = if (platform.is_web) @import("pr/surface_stub.zig") else @import("pr/surface.zig");
 const sidebar_state = @import("pr/sidebar/state.zig");
+const conversation_state = @import("pr/conversation/state.zig");
 const sidebar_controller = @import("pr/sidebar/controller.zig");
 const pr_types = @import("pr/db/types.zig");
 const review_controller = @import("pr/review_controller.zig");
@@ -288,6 +289,8 @@ pub const App = struct {
 
         // Native GitHub PR review session (async entry + review data). Defaulted.
         review: review_controller.ReviewSession = .{},
+        // The Conversation screen (`gc`) shown in place of the diff.
+        conversation: conversation_state.ConversationState = .{},
 
         // PR sidebar (AD-8): the stack-grouped PR list beside the diff, and
         // the native surface that owns its Store connection + SyncWorker.
@@ -2876,6 +2879,15 @@ pub const App = struct {
                 self.mode = .normal;
                 self.rebuildReviewLineMap();
                 self.showStatusMessage(submittedMessage(verdict));
+                if (myReviewState(verdict)) |review_state| {
+                    pr_surface.recordMyReview(&self.state.pr_surface, .{
+                        .allocator = self.allocator,
+                        .number = self.state.review.number,
+                        .sidebar = &self.state.sidebar,
+                        .state = review_state,
+                        .oid = self.state.review.head_ref_oid,
+                    });
+                }
                 self.startReviewRefetch();
                 self.needs_render = true;
             },
@@ -2904,6 +2916,16 @@ pub const App = struct {
             .comment => "review submitted (comment)",
             .approve => "review submitted (approve)",
             .request_changes => "review submitted (request changes)",
+        };
+    }
+
+    /// The sidebar's `my_review_state` for a verdict; a plain comment is not
+    /// an opinionated review, so it leaves the viewer's last one in place.
+    fn myReviewState(verdict: review_controller.Verdict) ?[]const u8 {
+        return switch (verdict) {
+            .comment => null,
+            .approve => "APPROVED",
+            .request_changes => "CHANGES_REQUESTED",
         };
     }
 

@@ -196,6 +196,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         const pr_bindings = [_]Binding{
             .{ .key = "R", .desc = "Submit review (verdict + body)" },
             .{ .key = "i", .desc = "PR info panel: checks, reviews, description" },
+            .{ .key = "gc", .desc = "Conversation ⇄ diff (Enter on a thread jumps to it)" },
             .{ .key = "C", .desc = "Comment target: GitHub ⇄ local" },
             .{ .key = "r", .desc = "Refresh diff + refetch threads (off a comment)" },
             .{ .key = "Enter", .desc = "Reply to thread (on thread)" },

@@ -11,6 +11,8 @@ pub const pr = @import("pr/pr.zig");
 pub const sidebar_layout = @import("pr/sidebar/layout.zig");
 pub const sidebar_render = @import("pr/sidebar/render.zig");
 pub const line_writer = @import("pr/line_writer.zig");
+pub const conversation_timeline = @import("pr/conversation/timeline.zig");
+pub const conversation_state = @import("pr/conversation/state.zig");
 
 test {
     std.testing.refAllDecls(@This());
