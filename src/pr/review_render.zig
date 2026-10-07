@@ -14,6 +14,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const review_controller = @import("review_controller.zig");
 const review_parse = @import("review_parse.zig");
+const review_status = @import("review_status.zig");
 const line_writer = @import("line_writer.zig");
 const width_util = @import("../rendering/width.zig");
 const skim_io = @import("skim_io");
@@ -448,23 +449,19 @@ fn fillBackground(win: vaxis.Window, bg: Color) void {
 }
 
 fn checkGlyph(c: CheckRun) []const u8 {
-    if (!std.mem.eql(u8, c.status, "COMPLETED")) return "●";
-    if (isFailureConclusion(c.conclusion)) return "✗";
-    return "✓";
+    return switch (review_status.checkOutcome(c)) {
+        .pending => "●",
+        .failed => "✗",
+        .passed => "✓",
+    };
 }
 
 fn checkStyle(c: CheckRun) Style {
-    if (!std.mem.eql(u8, c.status, "COMPLETED")) return warn_yellow;
-    if (isFailureConclusion(c.conclusion)) return danger;
-    return ok_green;
-}
-
-fn isFailureConclusion(conclusion: []const u8) bool {
-    const failures = [_][]const u8{ "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE" };
-    for (failures) |f| {
-        if (std.mem.eql(u8, conclusion, f)) return true;
-    }
-    return false;
+    return switch (review_status.checkOutcome(c)) {
+        .pending => warn_yellow,
+        .failed => danger,
+        .passed => ok_green,
+    };
 }
 
 fn reviewStateLabel(state: ReviewState) []const u8 {

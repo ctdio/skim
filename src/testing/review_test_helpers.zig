@@ -425,6 +425,50 @@ test "snapshot: pr_description_collapsed" {
     });
 }
 
+const status_reviews = [_]review_parse.Review{
+    .{ .id = "R1", .author = "bob", .state = .approved, .body = "", .submitted_at = "" },
+    .{ .id = "R2", .author = "carol", .state = .changes_requested, .body = "", .submitted_at = "" },
+    .{ .id = "R3", .author = "dave", .state = .approved, .body = "", .submitted_at = "" },
+};
+const status_checks = [_]review_parse.CheckRun{
+    .{ .name = "build", .status = "COMPLETED", .conclusion = "SUCCESS" },
+    .{ .name = "lint", .status = "COMPLETED", .conclusion = "FAILURE" },
+    .{ .name = "e2e", .status = "IN_PROGRESS", .conclusion = "" },
+};
+
+test "snapshot: pr_description_status" {
+    try renderDescriptionSnapshot("pr_description_status", .{
+        .body = "Retry with backoff.",
+        .width = 90,
+        .view = .{
+            .number = 42,
+            .title = "Add retry to the sync worker",
+            .author = "alice",
+            .head_ref = "feat/retry",
+            .base_ref = "main",
+            .lines = &.{},
+            .placeholder = "No description.",
+            .collapsed = false,
+            .status = .{ .reviews = &status_reviews, .checks = &status_checks },
+        },
+    });
+}
+
+test "snapshot: pr_description_status_collapsed_no_reviews" {
+    try renderDescriptionSnapshot("pr_description_status_collapsed_no_reviews", .{
+        .body = "Retry with backoff.",
+        .view = .{
+            .number = 42,
+            .title = "Add retry to the sync worker",
+            .author = "alice",
+            .lines = &.{},
+            .placeholder = "No description.",
+            .collapsed = true,
+            .status = .{ .reviews = &.{}, .checks = status_checks[0..1] },
+        },
+    });
+}
+
 test "snapshot: pr_description_loading" {
     try renderDescriptionSnapshot("pr_description_loading", .{
         .body = "",

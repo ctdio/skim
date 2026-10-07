@@ -1,0 +1,5 @@
+┃ ▾ #42 Add retry to the sync worker  alice · feat/retry → main
+┃ ✓ approved by bob, dave · ✗ changes requested by carol · checks ✓1 ✗1 ●1 (lint)
+┃
+┃ Retry with backoff.
+┃

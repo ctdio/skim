@@ -13,6 +13,8 @@ const common = @import("common.zig");
 const width_util = @import("width.zig");
 const line_map = @import("../line_map.zig");
 const description = @import("../pr/description.zig");
+const review_parse = @import("../pr/review_parse.zig");
+const review_status = @import("../pr/review_status.zig");
 const md_colors = @import("../agent/markdown/colors.zig");
 
 const Allocator = std.mem.Allocator;
@@ -34,6 +36,14 @@ pub const DescriptionView = struct {
     /// loading / unavailable note while the review data is not in yet).
     placeholder: []const u8,
     collapsed: bool,
+    /// Reviews and checks for the status row under the title. Null while the
+    /// review data is not in, which drops the row.
+    status: ?StatusSource = null,
+};
+
+pub const StatusSource = struct {
+    reviews: []const review_parse.Review,
+    checks: []const review_parse.CheckRun,
 };
 
 /// Narrowest content column; below this rows clip instead of wrapping
@@ -45,10 +55,6 @@ const min_inner_width = 12;
 pub fn lineCount(lines: []const description.Line) usize {
     return @max(1, lines.len);
 }
-
-/// Rows the expanded header takes: the title row and a blank row before the
-/// body.
-const header_rows = 2;
 
 /// Columns left of the content: the bar and a space, as diff lines draw it.
 const bar_cols = 2;
@@ -62,7 +68,7 @@ pub fn rowHeight(params: struct {
     allocator: Allocator,
 }) usize {
     switch (params.row.kind) {
-        .header => return if (params.view.collapsed) 1 else header_rows,
+        .header => return headerRows(params.view),
         .bottom, .gap => return 1,
         .body_line => {},
     }
@@ -154,14 +160,18 @@ const Styles = struct {
     const number: vaxis.Style = .{ .fg = Color.dim_gray };
     const title: vaxis.Style = .{ .fg = Color.bright_white, .bold = true };
     const meta: vaxis.Style = .{ .fg = Color.dim_gray };
+    const ok: vaxis.Style = .{ .fg = Color.green };
+    const failed: vaxis.Style = .{ .fg = Color.red };
+    const pending: vaxis.Style = .{ .fg = Color.yellow };
     const author: vaxis.Style = .{ .fg = Color.cyan };
     const hint: vaxis.Style = .{ .fg = Color.dim_gray, .italic = true };
     const cursor_marker: vaxis.Style = .{ .fg = Color.bright_white, .bold = true };
 };
 
-/// `┃ ▾ #42 Title  alice · head → base · draft`, then a bar-only row. Folded:
-/// `┃ ▸ #42 Title  alice · 12 lines · o to expand`. As width runs out the
-/// detail goes first, then the author, then the title truncates.
+/// `┃ ▾ #42 Title  alice · head → base · draft`, the status row, then a
+/// bar-only row. Folded: `┃ ▸ #42 Title  alice · 12 lines · o to expand` and
+/// the status row. As width runs out the detail goes first, then the author,
+/// then the title truncates.
 fn drawHeader(ctx: DrawContext, view: DescriptionView) usize {
     const width: usize = ctx.win.width;
     const a = ctx.frame_allocator;
@@ -196,9 +206,57 @@ fn drawHeader(ctx: DrawContext, view: DescriptionView) usize {
         .{ .text = if (show_meta) view.author else "", .style = Styles.author },
         .{ .text = if (show_detail) detail else "", .style = if (view.collapsed) Styles.hint else Styles.meta },
     } });
-    if (view.collapsed) return 1;
-    _ = drawBarRow(title_ctx, .{ .row = ctx.start_row + 1, .segments = &.{} });
-    return header_rows;
+    var row = ctx.start_row + 1;
+    if (view.status) |source| {
+        _ = drawBarRow(title_ctx, .{ .row = row, .segments = statusSegments(a, source) catch &.{} });
+        row += 1;
+    }
+    if (!view.collapsed) _ = drawBarRow(title_ctx, .{ .row = row, .segments = &.{} });
+    return headerRows(view);
+}
+
+/// Title row, the status row when there is review data, and a blank row
+/// before the body when expanded.
+fn headerRows(view: DescriptionView) usize {
+    return 1 + @as(usize, @intFromBool(view.status != null)) + @as(usize, @intFromBool(!view.collapsed));
+}
+
+/// `✓ approved by alice, bob · ✗ changes requested by carol · checks ✓12 ✗1 ●2 (lint)`.
+/// Clipped at the window edge rather than wrapped.
+fn statusSegments(arena: Allocator, source: StatusSource) ![]const vaxis.Cell.Segment {
+    const status = try review_status.summarize(arena, .{ .reviews = source.reviews, .checks = source.checks });
+    var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
+    if (status.approvers.len > 0) {
+        try segments.appendSlice(arena, &.{
+            .{ .text = "✓ ", .style = Styles.ok },
+            .{ .text = "approved by ", .style = Styles.meta },
+            .{ .text = try std.mem.join(arena, ", ", status.approvers), .style = Styles.author },
+        });
+    } else {
+        try segments.append(arena, .{ .text = "no approvals", .style = Styles.meta });
+    }
+    if (status.change_requesters.len > 0) {
+        try segments.appendSlice(arena, &.{
+            .{ .text = " · ", .style = Styles.meta },
+            .{ .text = "✗ ", .style = Styles.failed },
+            .{ .text = "changes requested by ", .style = Styles.meta },
+            .{ .text = try std.mem.join(arena, ", ", status.change_requesters), .style = Styles.author },
+        });
+    }
+    if (source.checks.len > 0) {
+        try segments.append(arena, .{ .text = " · checks", .style = Styles.meta });
+        if (status.passed > 0) try segments.append(arena, .{ .text = try std.fmt.allocPrint(arena, " ✓{d}", .{status.passed}), .style = Styles.ok });
+        if (status.failed > 0) try segments.append(arena, .{ .text = try std.fmt.allocPrint(arena, " ✗{d}", .{status.failed}), .style = Styles.failed });
+        if (status.pending > 0) try segments.append(arena, .{ .text = try std.fmt.allocPrint(arena, " ●{d}", .{status.pending}), .style = Styles.pending });
+        if (status.failing.len > 0) {
+            try segments.appendSlice(arena, &.{
+                .{ .text = " (", .style = Styles.meta },
+                .{ .text = try std.mem.join(arena, ", ", status.failing), .style = Styles.failed },
+                .{ .text = ")", .style = Styles.meta },
+            });
+        }
+    }
+    return segments.items;
 }
 
 /// `┃ <segments>`, with the cursor background across the row when set.

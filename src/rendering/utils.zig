@@ -1494,6 +1494,7 @@ pub const RenderUtils = struct {
             .lines = review.description_lines,
             .placeholder = review_controller.descriptionPlaceholder(review),
             .collapsed = review.description_collapsed,
+            .status = if (review.data_unavailable) null else .{ .reviews = review.reviews.items, .checks = review.checks.items },
         };
     }
 
