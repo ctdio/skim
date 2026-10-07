@@ -128,6 +128,42 @@ not wait on git. The cache is safe to delete at any time; skim rebuilds it on
 the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
 `~/.skim/cache/` directory is no longer used and can be deleted.
 
+#### The PR View
+
+The screen splits into the sidebar on the left and the selected PR's diff on
+the right. `Ctrl-w h` / `Ctrl-w l` move focus between them; from the sidebar,
+`Enter` or `Tab` also focuses the diff.
+
+Above the first file, the diff shows the PR's description block:
+
+```
+┃ ▾ #42 Add retry to the sync worker  alice · feat/retry → main
+┃ ✓ approved by bob, dave · ✗ changes requested by carol · checks ✓12 ✗1 ●2 (lint)
+┃
+┃ Retry fetchPage with backoff …
+```
+
+The first row is the number, title, author, and branches. The second row lists
+who has approved and who has requested changes, then tallies the checks as
+passed (`✓`), failed (`✗`), and pending (`●`), with the failed check names in
+parentheses. A reviewer's latest approve, request-changes, or dismissal is the
+one that counts; a later plain comment does not withdraw an approval. The row
+appears once the PR's review data has loaded. `o` on the block folds the
+description to its first two rows, and the fold carries over to the next PR you
+open.
+
+The diff shows one of two views of the PR:
+
+- **The PR's own diff** (the default): its base branch to its head. For a PR
+  stacked on another, the base is the parent PR's branch.
+- **Changes since seen** (`c`): if the PR was pushed to since you last saw it,
+  only the new commits; if its history was rewritten, the full diff with every
+  file that did not change since then folded. `c` again returns to the PR's
+  own diff.
+
+`i` opens the PR info panel: every check, every review with its first line, and
+the description, scrollable.
+
 #### Sidebar Keys
 
 | Key                      | Action                                                                                                          |
@@ -165,13 +201,13 @@ and `Ctrl-w` deletes the last word.
 
 #### Diff Keys While the Sidebar Is Open
 
-| Key                | Action                                                                                                                       |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `Ctrl-w h`         | Focus the sidebar                                                                                                            |
-| `Tab` / `Shift-Tab` | Cycle the hunk filter, as in the plain diff                                                                                 |
-| `Ctrl-b`           | Hide / show the sidebar                                                                                                      |
-| `b` / `PageUp`     | Page up (`Ctrl-b` is taken by the sidebar toggle)                                                                            |
-| `S` / `c` / `m`    | As in the sidebar, for the PR shown (replaces their usual diff meanings, e.g. `S` no longer opens the Graphite stack picker) |
+| Key                 | Action                                            |
+| ------------------- | ------------------------------------------------- |
+| `Ctrl-w h`          | Focus the sidebar                                 |
+| `Tab` / `Shift-Tab` | Cycle the hunk filter, as in the plain diff       |
+| `Ctrl-b`            | Hide / show the sidebar                           |
+| `b` / `PageUp`      | Page up (`Ctrl-b` is taken by the sidebar toggle) |
+| `c` / `m`           | As in the sidebar, for the PR shown               |
 
 Every other diff key works as usual, including the [PR Review](#pr-review) keys.
 
@@ -308,20 +344,21 @@ conversation rather than a pile of notes.
 
 Available when a pull request is open in the diff (`skim pr`). Keys marked _(on thread)_ act on the review thread under the cursor.
 
-| Key                   | Action                                                    |
-| --------------------- | --------------------------------------------------------- |
-| `C`                   | Toggle new-comment target (GitHub pending review ⇄ local) |
-| `Enter` _(on thread)_ | Reply to the review thread                                |
-| `e` _(on thread)_     | Edit your own comment in the thread                       |
-| `d` _(on thread)_     | Delete your own comment (two-step confirm)                |
-| `x` _(on thread)_     | Toggle resolve / unresolve on the thread                  |
-| `R`                   | Open submit-review dialog (verdict + body)                |
-| `i`                   | Toggle read-only PR info panel                            |
-| `r`                   | Refresh diff and refetch review threads                   |
+| Key                    | Action                                                    |
+| ---------------------- | --------------------------------------------------------- |
+| `C`                    | Toggle new-comment target (GitHub pending review ⇄ local) |
+| `Enter` _(on thread)_  | Reply to the review thread                                |
+| `e` _(on thread)_      | Edit your own comment in the thread                       |
+| `d` _(on thread)_      | Delete your own comment (two-step confirm)                |
+| `x` _(on thread)_      | Toggle resolve / unresolve on the thread                  |
+| `R`                    | Open submit-review dialog (verdict + body)                |
+| `i`                    | Toggle read-only PR info panel                            |
+| `o` _(on description)_ | Fold / expand the PR description block                    |
+| `r`                    | Refresh diff and refetch review threads                   |
 
 **SUBMIT REVIEW dialog** (`R`): `Tab` / `Shift-Tab` cycle the verdict (Comment / Approve / Request changes), `Ctrl-S` submits, `Ctrl-D` discards the pending review (two-step confirm), `ESC` cancels. Body editing uses the same vim-style editor as comments.
 
-**PR INFO panel** (`i`): `j` / `k` scroll, `Ctrl-d` / `Ctrl-u` page, `g` / `G` jump to top / bottom, `i` / `q` / `ESC` close.
+**PR INFO panel** (`i`): `j` / `k` scroll, `Ctrl-d` / `Ctrl-u` page, `g` / `G` jump to top / bottom, `r` refetch, `i` / `q` / `ESC` close.
 
 #### View Modes
 

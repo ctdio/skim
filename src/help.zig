@@ -172,8 +172,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "l / h", .desc = "Expand / collapse the stack" },
             .{ .key = "S", .desc = "Collapse / expand every stack" },
             .{ .key = "Enter", .desc = "Open the selected PR" },
-            .{ .key = "c", .desc = "Changes since seen (diff or folds)" },
-            .{ .key = "m", .desc = "Mark seen / unseen" },
+            .{ .key = "c", .desc = "Changes since seen ⇄ PR's own diff (sidebar or diff)" },
+            .{ .key = "m", .desc = "Mark seen / unseen (sidebar or diff)" },
             .{ .key = "Δ • ◆", .desc = "Pushed since seen · never seen · cached" },
             .{ .key = "3s preview", .desc = "Marks a never-seen PR seen (Δ needs Enter/Tab/m)" },
             .{ .key = "f", .desc = "Filter menu (presets, toggles, clear)" },
@@ -195,7 +195,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         try content_lines.append(app.allocator, .{ .section = "PR REVIEW" });
         const pr_bindings = [_]Binding{
             .{ .key = "R", .desc = "Submit review (verdict + body)" },
-            .{ .key = "i", .desc = "Toggle PR info panel" },
+            .{ .key = "i", .desc = "PR info panel: checks, reviews, description" },
             .{ .key = "C", .desc = "Comment target: GitHub ⇄ local" },
             .{ .key = "r", .desc = "Refresh diff + refetch threads (off a comment)" },
             .{ .key = "Enter", .desc = "Reply to thread (on thread)" },
@@ -203,6 +203,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "x", .desc = "Resolve / unresolve (on thread)" },
             .{ .key = "d", .desc = "Delete your comment (on thread)" },
             .{ .key = "o", .desc = "Fold / expand thread (on thread)" },
+            .{ .key = "o", .desc = "Fold / expand description (on it)" },
+            .{ .key = "✓ ✗ ●", .desc = "Status row: approvals, changes, checks" },
         };
         for (pr_bindings) |b| {
             try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
