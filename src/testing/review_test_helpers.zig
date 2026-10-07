@@ -528,6 +528,43 @@ test "gc: Enter on a code thread returns to the diff with the cursor on it" {
     try testing.expectEqual(@as(usize, 0), record.line_type.review_thread.thread_idx);
 }
 
+test "diff header names no file while the PR description is at the top" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    try surface_controller.enterReviewDiff(app.surfaceCtx(), .{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    var ctx = try harness.createTestContext(allocator, 80, 30);
+    defer ctx.deinit();
+
+    try review.frame.render(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    const header = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    try testing.expect(std.mem.indexOf(u8, header, "File 1 of") == null);
+}
+
+test "diff header names the file once the PR description scrolls away" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    try surface_controller.enterReviewDiff(app.surfaceCtx(), .{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    var ctx = try harness.createTestContext(allocator, 80, 30);
+    defer ctx.deinit();
+    app.state.global_scroll_offset = app.state.line_map.file_header_lines[0];
+
+    try review.frame.render(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    const header = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    try testing.expect(std.mem.indexOf(u8, header, "File 1 of") != null);
+}
+
 test "gc: with no PR open the diff stays" {
     const allocator = testing.allocator;
     var app = try initDiffApp(allocator);
