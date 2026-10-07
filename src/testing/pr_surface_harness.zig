@@ -815,8 +815,13 @@ fn s9EnterAndFocus(ctx: *Ctx) !void {
     defer ctx.allocator.free(head9);
     try expectTwoRefs(&h, .{ .ref1 = "origin/main", .ref2 = head9, .use_merge_base = true });
 
+    const tab_hunk_mode = app.state.hunk_view_mode;
     try h.pressChar(Key.tab);
-    if (app.mode != .pr_review) return ctx.fail("Tab from the diff: mode {s}, expected pr_review", .{@tagName(app.mode)});
+    if (app.state.hunk_view_mode == tab_hunk_mode) return ctx.fail("Tab did not change the hunk view mode", .{});
+    if (app.mode != .normal) return ctx.fail("Tab moved focus to {s}", .{@tagName(app.mode)});
+    try h.pressCtrl('w');
+    try h.pressChar('h');
+    if (app.mode != .pr_review) return ctx.fail("Ctrl-w h from the diff: mode {s}, expected pr_review", .{@tagName(app.mode)});
     try h.pressChar('l');
     if (app.mode != .normal) return ctx.fail("l from the sidebar: mode {s}, expected normal", .{@tagName(app.mode)});
     try h.pressCtrl('b');

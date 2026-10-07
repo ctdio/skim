@@ -459,6 +459,31 @@ test "snapshot: pr_description_long_title_narrow" {
     });
 }
 
+test "description header under the cursor keeps the title off the cursor background" {
+    const view: description_block.DescriptionView = .{
+        .number = 42,
+        .title = "Add retry",
+        .author = "alice",
+        .lines = &.{},
+        .placeholder = "No description.",
+        .collapsed = false,
+    };
+    const row: description_block.Row = .{ .kind = .header, .line_idx = 0 };
+
+    var plain = try harness.createTestContext(testing.allocator, 40, 4);
+    defer plain.deinit();
+    _ = description_block.drawRow(plain.window(), .{ .view = view, .row = row, .start_row = 0, .is_cursor = false, .frame_allocator = plain.frameAllocator() });
+    var cursor = try harness.createTestContext(testing.allocator, 40, 4);
+    defer cursor.deinit();
+    _ = description_block.drawRow(cursor.window(), .{ .view = view, .row = row, .start_row = 0, .is_cursor = true, .frame_allocator = cursor.frameAllocator() });
+
+    // `┃ ▾ #42 Add retry`: the title starts at column 8.
+    for ([_]u16{ 0, 2, 4, 8, 30 }) |col| {
+        try testing.expectEqual(vaxis.Cell.Color.default, cursor.screen.readCell(col, 0).?.style.bg);
+    }
+    try testing.expect(!std.meta.eql(plain.screen.readCell(0, 0).?.style, cursor.screen.readCell(0, 0).?.style));
+}
+
 test "description rowHeight equals the rows drawRow draws for a wrapped line" {
     const lines = [_]review.description.Line{.{ .kind = .bullet, .text = "a long **description** line that wraps across several rows of a narrow window" }};
     const view: description_block.DescriptionView = .{

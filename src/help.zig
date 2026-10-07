@@ -160,7 +160,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     if (app.state.sidebar.open) {
         try content_lines.append(app.allocator, .{ .section = "PR SIDEBAR" });
         const sidebar_bindings = [_]Binding{
-            .{ .key = "Tab / ^w h", .desc = "Focus the sidebar (from the diff)" },
+            .{ .key = "^w h", .desc = "Focus the sidebar (from the diff)" },
             .{ .key = "l / Tab / ^w l", .desc = "Focus the diff (from the sidebar)" },
             .{ .key = "^b", .desc = "Hide / show the sidebar" },
             .{ .key = "j / k", .desc = "Move between rows" },
@@ -310,11 +310,9 @@ fn unavailable(binding: Binding) bool {
     return false;
 }
 
-/// Tab and Ctrl-b move focus to and toggle the PR sidebar while it is open,
-/// so the diff's hunk filter and page up are listed under the keys that still
-/// reach them.
+/// Ctrl-b toggles the PR sidebar while it is open, so the diff's page up is
+/// listed under the keys that still reach it.
 fn sidebarOverride(binding: Binding) Binding {
-    if (std.mem.eql(u8, binding.key, "Tab")) return .{ .key = "Shift-Tab", .desc = "Cycle hunk filter (backward)" };
     if (std.mem.eql(u8, binding.key, "b / Ctrl-b")) return .{ .key = "b / PageUp", .desc = binding.desc };
     return binding;
 }

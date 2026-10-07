@@ -144,7 +144,7 @@ the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
 | `S`                      | Toggle the whole stack's diff ⇄ the PR's own                                                                    |
 | `c`                      | Changes since seen: the new commits, or fold the unchanged files                                                |
 | `m`                      | Mark seen / unseen                                                                                              |
-| `f`                      | Filter menu: presets, quick toggles, custom query, clear                                                        |
+| `f`                      | Filter menu: presets, quick toggles, custom query, clear (`j`/`k` or `Ctrl-n`/`Ctrl-p` to move)                 |
 | `/`                      | Filter query prompt (see below)                                                                                 |
 | `F`                      | Next filter preset                                                                                              |
 | `R`                      | Sync now                                                                                                        |
@@ -167,8 +167,8 @@ and `Ctrl-w` deletes the last word.
 
 | Key                | Action                                                                                                                       |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `Tab` / `Ctrl-w h` | Focus the sidebar (`Tab` also shows it if hidden)                                                                            |
-| `Shift-Tab`        | Cycle the hunk filter (`Tab` is taken by sidebar focus)                                                                      |
+| `Ctrl-w h`         | Focus the sidebar                                                                                                            |
+| `Tab` / `Shift-Tab` | Cycle the hunk filter, as in the plain diff                                                                                 |
 | `Ctrl-b`           | Hide / show the sidebar                                                                                                      |
 | `b` / `PageUp`     | Page up (`Ctrl-b` is taken by the sidebar toggle)                                                                            |
 | `S` / `c` / `m`    | As in the sidebar, for the PR shown (replaces their usual diff meanings, e.g. `S` no longer opens the Graphite stack picker) |

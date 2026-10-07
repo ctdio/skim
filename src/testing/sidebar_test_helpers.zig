@@ -1520,7 +1520,7 @@ test "snapshot: whole_stack_indicator" {
     try expectAppSnapshot(.{ .name = "whole_stack_indicator", .cols = 120, .rows = 24, .previewed = 813, .previewed_view = .whole_stack });
 }
 
-test "help: with the sidebar open, the diff's hunk filter and page up list the keys that still reach them" {
+test "help: with the sidebar open, page up lists the keys that still reach it" {
     var app = try diffFocusedApp();
     defer app.deinit();
 
@@ -1531,8 +1531,7 @@ test "help: with the sidebar open, the diff's hunk filter and page up list the k
 
     try testing.expect(std.mem.indexOf(u8, top, "b / PageUp") != null);
     try testing.expect(std.mem.indexOf(u8, top, "Ctrl-b") == null);
-    try testing.expect(std.mem.indexOf(u8, bottom, "Shift-Tab      │ Cycle hunk filter (backward)") != null);
-    try testing.expect(std.mem.indexOf(u8, bottom, "  Tab            │") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom, "Tab            │ Cycle hunk filter") != null);
 }
 
 test "help: with the sidebar closed, Tab and Ctrl-b are listed for the diff" {
@@ -1548,6 +1547,18 @@ test "help: with the sidebar closed, Tab and Ctrl-b are listed for the diff" {
     try testing.expect(std.mem.indexOf(u8, top, "b / Ctrl-b") != null);
     try testing.expect(std.mem.indexOf(u8, bottom, "Tab            │ Cycle hunk filter") != null);
     try testing.expect(std.mem.indexOf(u8, bottom, "Shift-Tab") == null);
+}
+
+test "filter menu: Ctrl-n and Ctrl-p move the cursor down and up" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = 'f' });
+    const start = app.state.sidebar.menu.?.cursor;
+
+    try app.handleKey(.{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+    try testing.expectEqual(start + 1, app.state.sidebar.menu.?.cursor);
+    try app.handleKey(.{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    try testing.expectEqual(start, app.state.sidebar.menu.?.cursor);
 }
 
 test "Esc in the sidebar: an open filter prompt is cancelled before anything else" {
@@ -1597,15 +1608,15 @@ test "sidebar keys: l and Ctrl-b keep the sidebar when no diff is loaded" {
     try testing.expect(app.state.sidebar.visible);
 }
 
-test "diff keys: Tab with the sidebar hidden shows it and focuses it" {
+test "diff keys: Tab cycles the hunk view and keeps the diff focused" {
     var app = try diffFocusedApp();
     defer app.deinit();
-    app.state.sidebar.visible = false;
+    const hunk_mode = app.state.hunk_view_mode;
 
     try app.handleKey(.{ .codepoint = Key.tab });
 
-    try testing.expect(app.state.sidebar.visible);
-    try testing.expectEqual(root.App.Mode.pr_review, app.mode);
+    try testing.expect(app.state.hunk_view_mode != hunk_mode);
+    try testing.expectEqual(root.App.Mode.normal, app.mode);
 }
 
 test "diff keys: Shift-Tab still cycles the hunk view with the sidebar hidden" {

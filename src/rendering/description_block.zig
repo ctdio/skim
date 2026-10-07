@@ -156,6 +156,7 @@ const Styles = struct {
     const meta: vaxis.Style = .{ .fg = Color.dim_gray };
     const author: vaxis.Style = .{ .fg = Color.cyan };
     const hint: vaxis.Style = .{ .fg = Color.dim_gray, .italic = true };
+    const cursor_marker: vaxis.Style = .{ .fg = Color.bright_white, .bold = true };
 };
 
 /// `┃ ▾ #42 Title  alice · head → base · draft`, then a bar-only row. Folded:
@@ -180,10 +181,15 @@ fn drawHeader(ctx: DrawContext, view: DescriptionView) usize {
     const show_detail = show_meta and title_cols + author_cols + width_util.displayWidth(detail) <= room;
     const title = truncate(a, .{ .text = view.title, .width = room }) catch view.title;
 
-    if (ctx.cursor_bg) |bg| ctx.fill(.{ .row = ctx.start_row, .col = 0, .count = width, .glyph = " ", .style = .{ .bg = bg } });
-    ctx.print(.{ .row = ctx.start_row, .segments = &.{
-        .{ .text = "┃ ", .style = Styles.bar },
-        .{ .text = if (view.collapsed) "▸ " else "▾ ", .style = Styles.fold },
+    // The cursor background makes the title and the dim meta hard to read,
+    // so the header marks the cursor with a bright bar and fold glyph instead
+    // of filling its rows.
+    const is_cursor = ctx.cursor_bg != null;
+    var title_ctx = ctx;
+    title_ctx.cursor_bg = null;
+    title_ctx.print(.{ .row = ctx.start_row, .segments = &.{
+        .{ .text = "┃ ", .style = if (is_cursor) Styles.cursor_marker else Styles.bar },
+        .{ .text = if (view.collapsed) "▸ " else "▾ ", .style = if (is_cursor) Styles.cursor_marker else Styles.fold },
         .{ .text = number, .style = Styles.number },
         .{ .text = title, .style = Styles.title },
         .{ .text = if (show_meta) "  " else "", .style = Styles.meta },
@@ -191,7 +197,7 @@ fn drawHeader(ctx: DrawContext, view: DescriptionView) usize {
         .{ .text = if (show_detail) detail else "", .style = if (view.collapsed) Styles.hint else Styles.meta },
     } });
     if (view.collapsed) return 1;
-    _ = drawBarRow(ctx, .{ .row = ctx.start_row + 1, .segments = &.{} });
+    _ = drawBarRow(title_ctx, .{ .row = ctx.start_row + 1, .segments = &.{} });
     return header_rows;
 }
 

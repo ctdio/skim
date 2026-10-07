@@ -109,10 +109,6 @@ pub fn handleDiffFocusKey(app: *App, key: Key) !bool {
         toggleSidebar(app);
         return true;
     }
-    if (key.codepoint == Key.tab and !key.mods.shift and !key.mods.ctrl) {
-        showAndFocusSidebar(app);
-        return true;
-    }
     if (key.mods.ctrl or key.mods.alt or normalPrefixPending(app)) return false;
     switch (key.codepoint) {
         'S' => toggleWholeStack(app),
@@ -170,14 +166,17 @@ fn handlePromptKey(app: *App, key: Key) !void {
     }
 }
 
-/// `f` menu: j/k, arrows and g/G move, Space/Enter activate, `/` jumps to
-/// the query prompt, Esc, `f` or `q` close. Other keys are swallowed so a
-/// stray one cannot act on the list behind the menu.
+/// `f` menu: j/k, Ctrl-n/Ctrl-p, arrows and g/G move, Space/Enter activate,
+/// `/` jumps to the query prompt, Esc, `f` or `q` close. Other keys are
+/// swallowed so a stray one cannot act on the list behind the menu.
 fn handleMenuKey(app: *App, key: Key) !void {
-    if (key.mods.ctrl or key.mods.alt) return;
+    if (key.mods.alt) return;
+    if (key.mods.ctrl and key.codepoint != 'n' and key.codepoint != 'p') return;
     const menu_key: sidebar_controller.MenuKey = switch (key.codepoint) {
         'j', Key.down => .down,
         'k', Key.up => .up,
+        'n' => if (key.mods.ctrl) .down else return,
+        'p' => if (key.mods.ctrl) .up else return,
         'g' => .top,
         'G' => .bottom,
         ' ', Key.enter => .activate,
