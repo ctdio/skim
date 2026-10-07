@@ -1719,6 +1719,30 @@ test "diff keys: Shift-Tab still cycles the hunk view with the sidebar hidden" {
     try testing.expectEqual(root.App.Mode.normal, app.mode);
 }
 
+test "diff keys: A does not stage the working tree or close the PR view" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+    app.state.pager_mode = false;
+
+    try app.handleKey(.{ .codepoint = 'A' });
+
+    try testing.expect(app.state.sidebar.open);
+    try testing.expect(app.state.diff_source == .stdin);
+    try testing.expectEqualStrings("staging is not available on a PR diff", app.state.status_message.?);
+}
+
+test "diff keys: a does not stage the current file or close the PR view" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+    app.state.pager_mode = false;
+
+    try app.handleKey(.{ .codepoint = 'a' });
+
+    try testing.expect(app.state.sidebar.open);
+    try testing.expect(app.state.diff_source == .stdin);
+    try testing.expectEqualStrings("staging is not available on a PR diff", app.state.status_message.?);
+}
+
 test "diff keys: Ctrl-b beside a wide diff hides the sidebar and keeps the diff focused" {
     var app = try diffFocusedApp();
     defer app.deinit();

@@ -114,6 +114,9 @@ pub fn handleDiffFocusKey(app: *App, key: Key) !bool {
     switch (key.codepoint) {
         'c' => try toggleSinceSeen(app),
         'm' => if (app.state.flip.previewed) |number| toggleSeen(app, number),
+        // Staging acts on the local working tree, not the PR, and the switch to
+        // the staged diff would close the PR surface.
+        'a', 'A' => app.showStatusError("staging is not available on a PR diff"),
         else => return false,
     }
     app.needs_render = true;
