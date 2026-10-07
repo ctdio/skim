@@ -1,30 +1,30 @@
  All open · 31/31            ⟳ 2m ago │File 1 of 2  src/bench/file_0.zig  +2 -2 [focused]                      Agent           Not connected
  no filter                            │▼ src/bench/file_0.zig  +2 -2
 ──────────────────────────────────────│
- ▸ #813 [3] Backoff helper        ✓●Δ │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
- ▸ #790 [2] Split parser module   ✗ • │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else {
-   #750 Standalone change 750     ✓ • │┃       return "beta"; }
-   #749 Standalone change 749      ✓• │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else {
-   #748 Standalone change 748       • │┃       return "beta"; }
-   #747 Standalone change 747     ✓ • │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else {
-   #746 Standalone change 746       • │┃       return "beta"; }
-   #745 Standalone change 745      ✓• │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else {
-   #744 Standalone change 744     ✓ • │┃       return "beta"; }
-   #743 Standalone change 743       • │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else {
-   #742 Standalone change 742       • │┃       return "beta"; }                                               Type a prompt and press Enter
-   #741 Standalone change 741     ✓✓• │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { to send.
-   #740 Standalone change 740       • │┃       return "beta"; }
-   #739 Standalone change 739       • │
-   #738 Standalone change 738     ✓ • │
-   #737 Standalone change 737      ✓• │
-   #736 Standalone change 736       • │▼ src/bench/file_1.zig  +2 -2
-   #735 Standalone change 735     ✓ • │
-   #734 Standalone change 734       • │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
-   #733 Standalone change 733      ✓• │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else {
-   #732 Standalone change 732     ✓ • │┃       return "beta"; }
-   #731 Standalone change 731       • │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else {
-   #730 Standalone change 730       • │┃       return "beta"; }
-   #729 Standalone change 729     ✓✓• │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else {
-   #728 Standalone change 728       • │┃       return "beta"; }                                                >
+ ▾ #813 [3] Backoff helper        ✓●Δ │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
+  ┌ #814 Wire retry into cli     D• • │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else {
+  │ #813 Backoff helper           ✓●Δ │┃       return "beta"; }
+  └ #812 Retry fetch on 502       ✓✓• │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else {
+ ▾ #790 [2] Split parser module   ✗ • │┃       return "beta"; }
+  ┌ #791 Parser tests               • │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else {
+  └ #790 Split parser module      ✗ • │┃       return "beta"; }
+   #750 Standalone change 750     ✓ • │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else {
+   #749 Standalone change 749      ✓• │┃       return "beta"; }
+   #748 Standalone change 748       • │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else {
+   #747 Standalone change 747     ✓ • │┃       return "beta"; }                                               Type a prompt and press Enter
+   #746 Standalone change 746       • │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { to send.
+   #745 Standalone change 745      ✓• │┃       return "beta"; }
+   #744 Standalone change 744     ✓ • │
+   #743 Standalone change 743       • │
+   #742 Standalone change 742       • │
+   #741 Standalone change 741     ✓✓• │▼ src/bench/file_1.zig  +2 -2
+   #740 Standalone change 740       • │
+   #739 Standalone change 739       • │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
+   #738 Standalone change 738     ✓ • │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else {
+   #737 Standalone change 737      ✓• │┃       return "beta"; }
+   #736 Standalone change 736       • │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else {
+   #735 Standalone change 735     ✓ • │┃       return "beta"; }
+   #734 Standalone change 734       • │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else {
+   #733 Standalone change 733      ✓• │┃       return "beta"; }                                                >
                                       │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else {
 DIFF -- NORMAL -- [Unified] [Stdin] [+/-]  File 1/2  j/k:Move  |  Tab:PRs  |  ? for help

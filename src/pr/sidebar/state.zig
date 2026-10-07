@@ -94,8 +94,11 @@ pub const SidebarState = struct {
     // Filtered view, rebuilt by `controller.rebuildRows`.
     stacks: filter_query.VisibleStacks = .{ .views = &.{}, .member_storage = &.{} },
     rows: std.ArrayList(Row) = .empty,
-    /// Expanded stacks, keyed by tip PR number so expansion survives reloads.
-    expanded: std.AutoHashMapUnmanaged(u32, void) = .{},
+    /// Collapse multi-PR stacks by default (toggled with `S`).
+    collapse_stacks: bool = false,
+    /// Stacks folded the other way from `collapse_stacks`, keyed by tip PR
+    /// number so the fold survives reloads.
+    toggled: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// PRs whose diff is in the prefetch cache (the `◆` glyph). Filled by
     /// `surface.zig` when the prefetch worker commits; keyed by number so it
     /// survives reloads.

@@ -118,7 +118,7 @@ const builtin_menu_presets = [_]state_mod.Preset{
 };
 
 /// Install a DB snapshot: recompute stack analysis and re-run the filter. The
-/// cursor follows `selected_number`; the prompt and expanded set survive.
+/// cursor follows `selected_number`; the prompt and stack folds survive.
 pub fn applySnapshot(state: *SidebarState, allocator: Allocator, snap: Snapshot) !void {
     var records = snap.records;
     var records_owned = true;
@@ -146,7 +146,7 @@ pub fn applySnapshot(state: *SidebarState, allocator: Allocator, snap: Snapshot)
 }
 
 /// Re-evaluate the active query over the current records and rebuild `rows`.
-/// Keeps `selected_number` (re-finds the cursor) and the expanded set.
+/// Keeps `selected_number` (re-finds the cursor) and the stack folds.
 pub fn rebuildRows(state: *SidebarState, allocator: Allocator) !void {
     const records = state.records orelse {
         clearRows(state, allocator);
@@ -195,9 +195,8 @@ pub fn moveWithinStack(state: *SidebarState, allocator: Allocator, delta: isize)
     if (sv.members.len == 1) return;
 
     if (row.kind == .stack_header) {
-        const tip = tipNumber(state, row.stack);
-        if (!state.expanded.contains(tip)) {
-            try state.expanded.put(allocator, tip, {});
+        if (!isExpanded(state, row.stack)) {
+            try toggleFold(state, allocator, row.stack);
             try layoutRows(state, allocator);
             state.cursor = memberRowOf(state, .{ .stack = row.stack, .record = @intCast(sv.target) }) orelse state.cursor;
             syncSelected(state);
@@ -232,13 +231,18 @@ pub fn moveToEdge(state: *SidebarState, edge: Edge) void {
 pub fn toggleExpand(state: *SidebarState, allocator: Allocator) !void {
     const row = cursorRow(state) orelse return;
     if (state.stacks.views[row.stack].members.len == 1) return;
-    const tip = tipNumber(state, row.stack);
-    if (state.expanded.remove(tip)) {
-        // Collapsing from a member keeps the cursor on the stack's header.
-        state.cursor_on_header = true;
-    } else {
-        try state.expanded.put(allocator, tip, {});
-    }
+    // Collapsing from a member keeps the cursor on the stack's header.
+    if (isExpanded(state, row.stack)) state.cursor_on_header = true;
+    try toggleFold(state, allocator, row.stack);
+    try layoutRows(state, allocator);
+}
+
+/// Expand the cursor's stack, cursor staying where it is (`l`).
+pub fn expand(state: *SidebarState, allocator: Allocator) !void {
+    const row = cursorRow(state) orelse return;
+    if (state.stacks.views[row.stack].members.len == 1) return;
+    if (isExpanded(state, row.stack)) return;
+    try toggleFold(state, allocator, row.stack);
     try layoutRows(state, allocator);
 }
 
@@ -246,8 +250,21 @@ pub fn toggleExpand(state: *SidebarState, allocator: Allocator) !void {
 pub fn collapse(state: *SidebarState, allocator: Allocator) !void {
     const row = cursorRow(state) orelse return;
     if (state.stacks.views[row.stack].members.len == 1) return;
-    _ = state.expanded.remove(tipNumber(state, row.stack));
+    if (isExpanded(state, row.stack)) try toggleFold(state, allocator, row.stack);
     state.cursor_on_header = true;
+    try layoutRows(state, allocator);
+}
+
+/// Collapse every stack, or expand every stack when they already default to
+/// collapsed (`S`). Per-stack folds are discarded.
+pub fn toggleCollapseAll(state: *SidebarState, allocator: Allocator) !void {
+    state.collapse_stacks = !state.collapse_stacks;
+    state.toggled.clearRetainingCapacity();
+    if (state.collapse_stacks) {
+        if (cursorRow(state)) |row| {
+            if (state.stacks.views[row.stack].members.len > 1) state.cursor_on_header = true;
+        }
+    }
     try layoutRows(state, allocator);
 }
 
@@ -464,8 +481,8 @@ pub fn selectNumber(state: *SidebarState, allocator: Allocator, number: u32) !bo
     for (state.stacks.views, 0..) |sv, stack_index| {
         for (sv.members) |member| {
             if (records.items[member].number != number) continue;
-            if (sv.members.len > 1) {
-                try state.expanded.put(allocator, tipNumber(state, stack_index), {});
+            if (sv.members.len > 1 and !isExpanded(state, stack_index)) {
+                try toggleFold(state, allocator, stack_index);
                 try layoutRows(state, allocator);
             }
             state.cursor = memberRowOf(state, .{ .stack = stack_index, .record = member }) orelse return false;
@@ -570,8 +587,8 @@ pub fn deinitState(state: *SidebarState, allocator: Allocator) void {
     state.rows.deinit(allocator);
     state.rows = .empty;
     releaseSnapshot(state, allocator);
-    state.expanded.deinit(allocator);
-    state.expanded = .{};
+    state.toggled.deinit(allocator);
+    state.toggled = .{};
     state.cached.deinit(allocator);
     state.cached = .{};
     if (state.active_query) |*query| query.deinit(allocator);
@@ -611,7 +628,7 @@ fn freePresets(state: *SidebarState, allocator: Allocator) void {
     state.base_preset = 0;
 }
 
-/// Rebuild `rows` from `stacks` and the expanded set, then re-find the cursor.
+/// Rebuild `rows` from `stacks` and the stack folds, then re-find the cursor.
 fn layoutRows(state: *SidebarState, allocator: Allocator) !void {
     var count: usize = 0;
     for (state.stacks.views, 0..) |sv, index| count += rowCountOf(state, .{ .stack = index, .members = sv.members.len });
@@ -624,7 +641,7 @@ fn layoutRows(state: *SidebarState, allocator: Allocator) !void {
             continue;
         }
         state.rows.appendAssumeCapacity(.{ .kind = .stack_header, .stack = stack_index, .record = @intCast(sv.target) });
-        if (!state.expanded.contains(tipNumber(state, index))) continue;
+        if (!isExpanded(state, index)) continue;
         for (sv.members) |member| {
             state.rows.appendAssumeCapacity(.{ .kind = .member, .stack = stack_index, .record = @intCast(member) });
         }
@@ -634,8 +651,18 @@ fn layoutRows(state: *SidebarState, allocator: Allocator) !void {
 
 fn rowCountOf(state: *const SidebarState, params: struct { stack: usize, members: usize }) usize {
     if (params.members == 1) return 1;
-    if (!state.expanded.contains(tipNumber(state, params.stack))) return 1;
+    if (!isExpanded(state, params.stack)) return 1;
     return 1 + params.members;
+}
+
+fn isExpanded(state: *const SidebarState, stack_index: usize) bool {
+    return state.collapse_stacks == state.toggled.contains(tipNumber(state, stack_index));
+}
+
+fn toggleFold(state: *SidebarState, allocator: Allocator, stack_index: usize) !void {
+    const tip = tipNumber(state, stack_index);
+    if (state.toggled.remove(tip)) return;
+    try state.toggled.put(allocator, tip, {});
 }
 
 /// After `rows` changed: put the cursor back on the selected PR. Prefers the
@@ -906,7 +933,7 @@ fn buildRows(state: *const SidebarState, range: struct { allocator: Allocator, f
             .author = record.author,
             .connector = if (row.kind == .member and stacked) state.analysis.?.markOf(row.record) else .none,
             .stack_size = if (row.kind == .stack_header) @intCast(sv.members.len) else 0,
-            .expanded = row.kind == .stack_header and state.expanded.contains(tipNumber(state, row.stack)),
+            .expanded = row.kind == .stack_header and isExpanded(state, row.stack),
             .is_draft = record.is_draft,
             .ci = record.ci,
             .review = reviewGlyphOf(record, ctx),

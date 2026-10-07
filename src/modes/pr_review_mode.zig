@@ -2,7 +2,7 @@
 //! AD-8), plus the few diff-focus keys that change meaning while the PR
 //! surface is open (`handleDiffFocusKey`), so every PR-surface key lives here.
 //! Navigation, filtering and presets are the sidebar controller's; this file
-//! owns focus, the PR view toggles (`S`, `c`, `m`) and hands previews,
+//! owns focus, the PR view toggles (`c`, `m`) and hands previews,
 //! sync and close to App.
 
 const std = @import("std");
@@ -74,9 +74,10 @@ pub fn handleKey(app: *App, key: Key) !void {
         'z' => sb.pending_z = true,
         ' ' => try sidebar_controller.toggleExpand(sb, app.allocator),
         'h' => try sidebar_controller.collapse(sb, app.allocator),
-        'l', Key.tab => if (!key.mods.shift) enterPreviewed(app),
+        'l' => try sidebar_controller.expand(sb, app.allocator),
+        Key.tab => if (!key.mods.shift) enterPreviewed(app),
         Key.enter => openSelected(app),
-        'S' => toggleWholeStack(app),
+        'S' => try sidebar_controller.toggleCollapseAll(sb, app.allocator),
         'c' => try toggleSinceSeen(app),
         'm' => if (sidebar_controller.selectedPr(sb)) |record| toggleSeen(app, record.number),
         'f' => sidebar_controller.openMenu(sb),
@@ -111,7 +112,6 @@ pub fn handleDiffFocusKey(app: *App, key: Key) !bool {
     }
     if (key.mods.ctrl or key.mods.alt or normalPrefixPending(app)) return false;
     switch (key.codepoint) {
-        'S' => toggleWholeStack(app),
         'c' => try toggleSinceSeen(app),
         'm' => if (app.state.flip.previewed) |number| toggleSeen(app, number),
         else => return false,
@@ -222,16 +222,6 @@ fn enterPreviewed(app: *App) void {
     flip_controller.markSeen(app.flipCtx(), record.number);
 }
 
-/// `S` (FR-7): the whole stack's diff for the shown PR, or back to its own.
-fn toggleWholeStack(app: *App) void {
-    const number = app.state.flip.previewed orelse return app.showStatusMessage("no PR shown");
-    if (app.state.flip.previewed_view == .whole_stack) return switchView(app, .{ .number = number, .view = .pr });
-    const sb = &app.state.sidebar;
-    const index = sidebar_controller.recordIndex(sb, number) orelse return;
-    if (sidebar_controller.stackPlace(sb, index).tip == null) return app.showStatusMessage("not a stacked PR");
-    switchView(app, .{ .number = number, .view = .whole_stack });
-}
-
 /// `c` (FR-8): back to the PR's own diff from the since-seen view; else the
 /// seen..head diff when the PR fast-forwarded, or the changed-files-only
 /// folds when its history was rewritten.
@@ -253,7 +243,7 @@ fn switchView(app: *App, params: struct { number: u32, view: flip.DiffView }) vo
     app.previewPr(params.number);
 }
 
-/// A normal-mode chord is waiting for its second key, which `S`/`c`/`m`
+/// A normal-mode chord is waiting for its second key, which `c`/`m`
 /// must reach (`zc` folds, `]c` …).
 fn normalPrefixPending(app: *const App) bool {
     const state = &app.state;

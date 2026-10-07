@@ -138,10 +138,10 @@ the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
 | `Ctrl-d` / `Ctrl-u`      | Half-page down / up                                                                                             |
 | `gg` / `G`               | Top / bottom                                                                                                    |
 | `Space` / `za`           | Expand / collapse a stack                                                                                       |
-| `h`                      | Collapse the stack                                                                                              |
+| `l` / `h`                | Expand / collapse the stack                                                                                     |
+| `S`                      | Collapse / expand every stack (stacks start expanded)                                                           |
 | `Enter`                  | Open the selected PR and focus the diff                                                                         |
-| `l` / `Tab` / `Ctrl-w l` | Focus the diff (marks the shown PR seen)                                                                        |
-| `S`                      | Toggle the whole stack's diff ⇄ the PR's own                                                                    |
+| `Tab` / `Ctrl-w l`       | Focus the diff (marks the shown PR seen)                                                                        |
 | `c`                      | Changes since seen: the new commits, or fold the unchanged files                                                |
 | `m`                      | Mark seen / unseen                                                                                              |
 | `f`                      | Filter menu: presets, quick toggles, custom query, clear (`j`/`k` or `Ctrl-n`/`Ctrl-p` to move)                 |
@@ -157,7 +157,7 @@ the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
 In the row's marker column, `Δ` means the PR was pushed to since you saw it,
 `•` that you have never seen it, and `◆` that its diff is cached. A PR you have
 never seen counts as seen after 3s of preview; one showing `Δ` keeps it until
-you focus its diff (`Enter`, `l`, `Tab`, `Ctrl-w l`) or press `m`.
+you focus its diff (`Enter`, `Tab`, `Ctrl-w l`) or press `m`.
 
 In the `/` prompt the current query starts selected, so typing replaces it;
 `Backspace`, `Right` or `End` keep it for editing. `Ctrl-u` clears the prompt

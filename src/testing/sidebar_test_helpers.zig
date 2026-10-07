@@ -55,6 +55,7 @@ const recent_sync = SyncSnapshot{ .last_ok_at = now - 120 };
 /// Rows of `stacked31` with both stacks collapsed: 2 headers + 26 standalones.
 const stacked31_rows = 28;
 const stacked31_expanded_rows = 31;
+const stacked31_all_expanded_rows = 33;
 const standalone_count = 26;
 const first_standalone: u32 = 750;
 /// One added line on `src/x.zig` for the App-backed close test.
@@ -121,6 +122,78 @@ test "toggleExpand: expanded set is keyed by tip number — survives a re-applie
     try testing.expectEqual(@as(u32, 813), rowNumber(&sb, 1));
     try expectRowNumbers(&sb, 2, &.{ 814, 813, 812 });
     try testing.expectEqual(@as(usize, stacked31_expanded_rows), sb.rows.items.len);
+}
+
+test "applySnapshot: stacks start expanded by default" {
+    const specs = stacked31Specs();
+    var sb = SidebarState{};
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.applySnapshot(&sb, testing.allocator, .{
+        .records = try records(testing.allocator, &specs),
+        .viewer_login = viewer,
+        .viewer_teams = "",
+        .sync = recent_sync,
+    });
+
+    try testing.expectEqual(@as(usize, stacked31_all_expanded_rows), sb.rows.items.len);
+    try expectRowNumbers(&sb, 1, &.{ 814, 813, 812 });
+}
+
+test "expand: l on a collapsed header expands the stack and keeps the cursor on the header" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try controller.expand(&sb, testing.allocator);
+
+    try testing.expectEqual(@as(usize, stacked31_expanded_rows), sb.rows.items.len);
+    try testing.expectEqual(@as(usize, 0), sb.cursor);
+    try testing.expect(sb.cursor_on_header);
+}
+
+test "expand: leaves an already expanded stack expanded" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.toggleExpand(&sb, testing.allocator);
+
+    try controller.expand(&sb, testing.allocator);
+    try testing.expectEqual(@as(usize, stacked31_expanded_rows), sb.rows.items.len);
+}
+
+test "expand: on a standalone row is a no-op" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    controller.move(&sb, 2);
+
+    try controller.expand(&sb, testing.allocator);
+
+    try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
+    try testing.expectEqual(@as(?u32, first_standalone), sb.selected_number);
+}
+
+test "toggleCollapseAll: expands every stack, discarding per-stack folds" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.toggleExpand(&sb, testing.allocator);
+
+    try controller.toggleCollapseAll(&sb, testing.allocator);
+
+    try testing.expect(!sb.collapse_stacks);
+    try testing.expectEqual(@as(usize, stacked31_all_expanded_rows), sb.rows.items.len);
+}
+
+test "toggleCollapseAll: collapsing from a member puts the cursor on its header" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.toggleCollapseAll(&sb, testing.allocator);
+    controller.move(&sb, 2);
+    try testing.expectEqual(@as(?u32, 813), sb.selected_number);
+
+    try controller.toggleCollapseAll(&sb, testing.allocator);
+
+    try testing.expect(sb.collapse_stacks);
+    try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
+    try testing.expectEqual(@as(usize, 0), sb.cursor);
+    try testing.expect(sb.cursor_on_header);
 }
 
 test "toggleExpand: on a standalone row is a no-op" {
@@ -1597,15 +1670,29 @@ test "Esc in the sidebar: `skim pr` quits once nothing is left to peel" {
     try testing.expect(app.should_quit);
 }
 
-test "sidebar keys: l and Ctrl-b keep the sidebar when no diff is loaded" {
+test "sidebar keys: Tab and Ctrl-b keep the sidebar when no diff is loaded" {
     var app = try sidebarApp();
     defer app.deinit();
 
-    try app.handleKey(.{ .codepoint = 'l' });
+    try app.handleKey(.{ .codepoint = Key.tab });
     try app.handleKey(.{ .codepoint = 'b', .mods = .{ .ctrl = true } });
 
     try testing.expectEqual(root.App.Mode.pr_review, app.mode);
     try testing.expect(app.state.sidebar.visible);
+}
+
+test "sidebar keys: S collapses every stack, then l expands the one under the cursor" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    const sb = &app.state.sidebar;
+
+    try app.handleKey(.{ .codepoint = 'S' });
+    try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
+
+    try app.handleKey(.{ .codepoint = 'l' });
+
+    try testing.expectEqual(@as(usize, stacked31_expanded_rows), sb.rows.items.len);
+    try testing.expectEqual(root.App.Mode.pr_review, app.mode);
 }
 
 test "diff keys: Tab cycles the hunk view and keeps the diff focused" {
@@ -1698,7 +1785,7 @@ test "filter menu keys: f, j to a toggle and Space filter the list live behind t
     var app = try sidebarApp();
     defer app.deinit();
     const sb = &app.state.sidebar;
-    try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
+    try testing.expectEqual(@as(usize, stacked31_all_expanded_rows), sb.rows.items.len);
 
     try app.handleKey(.{ .codepoint = 'f' });
     try testing.expect(sb.menu != null);
@@ -1771,7 +1858,7 @@ test "filter menu keys: G then Enter on Clear filter shows every PR" {
     try app.handleKey(.{ .codepoint = Key.enter });
 
     try testing.expectEqualStrings("", app.state.sidebar.queryText());
-    try testing.expectEqual(@as(usize, stacked31_rows), app.state.sidebar.rows.items.len);
+    try testing.expectEqual(@as(usize, stacked31_all_expanded_rows), app.state.sidebar.rows.items.len);
 }
 
 test "filter menu keys: / in the menu opens the prompt with the query, and typing filters on Enter" {
@@ -2458,7 +2545,7 @@ test "a miss that fails after a whole-stack load started restores the shown PR: 
     _ = try app.state.comment_store.add(noteOnAddedB("note-202"));
     app.state.review.gh_bin = flip_missing_bin;
     app.state.review.git_bin = flip_missing_bin;
-    try app.handleKey(.{ .codepoint = 'S' });
+    loadWholeStack(app, 202);
     try testing.expect(app.state.diff_load.isLoading());
     try testing.expectEqual(@as(?u32, 202), app.state.flip.loading_number);
 
@@ -2616,7 +2703,7 @@ test "closing the PR surface during a whole-stack load drops the saved source, s
     try fx.install(.{ .number = 202 });
     app.state.review.gh_bin = flip_missing_bin;
     app.state.review.git_bin = flip_missing_bin;
-    try app.handleKey(.{ .codepoint = 'S' });
+    loadWholeStack(app, 202);
     try testing.expect(app.state.pr_surface_parking.local_load != null);
 
     try app.switchDiffMode(.working);
@@ -2720,8 +2807,10 @@ fn records(allocator: Allocator, specs: []const RecSpec) !types.RecordList {
     return .{ .arena = arena, .items = items };
 }
 
+/// Starts with stacks collapsed so row indices stay short; the default
+/// (expanded) has its own test.
 fn stateFrom(specs: []const RecSpec, sync: SyncSnapshot) !SidebarState {
-    var sb = SidebarState{};
+    var sb = SidebarState{ .collapse_stacks = true };
     errdefer controller.deinitState(&sb, testing.allocator);
     try controller.applySnapshot(&sb, testing.allocator, .{
         .records = try records(testing.allocator, specs),
@@ -2730,6 +2819,13 @@ fn stateFrom(specs: []const RecSpec, sync: SyncSnapshot) !SidebarState {
         .sync = sync,
     });
     return sb;
+}
+
+/// Start loading `number`'s whole-stack diff with the diff focused.
+fn loadWholeStack(app: *root.App, number: u32) void {
+    app.state.flip.view = .whole_stack;
+    app.state.flip.focus_diff = true;
+    app.previewPr(number);
 }
 
 fn stacked31State() !SidebarState {
@@ -3531,7 +3627,7 @@ test "the dwell leaves a PR seen at an older head alone, so its Δ survives" {
     try testing.expectEqualStrings(oid_b, &(try fx.store().getSeen(fx.repoId(), 101)).?.head_oid);
 }
 
-test "l on a PR seen at an older head marks it seen at its head" {
+test "Tab on a PR seen at an older head marks it seen at its head" {
     var fx = try FlipApp.init();
     defer fx.deinit();
     const app = &fx.app;
@@ -3539,13 +3635,13 @@ test "l on a PR seen at an older head marks it seen at its head" {
     try testing.expect(try controller.selectNumber(&app.state.sidebar, testing.allocator, 101));
     try fx.install(.{ .number = 101 });
 
-    try app.handleKey(.{ .codepoint = 'l' });
+    try app.handleKey(.{ .codepoint = Key.tab });
 
     try testing.expectEqual(root.App.Mode.normal, app.mode);
     try testing.expectEqualStrings(oid_a, &(try fx.store().getSeen(fx.repoId(), 101)).?.head_oid);
 }
 
-test "Ctrl-w l focuses the diff and marks the shown PR seen, like l" {
+test "Ctrl-w l focuses the diff and marks the shown PR seen, like Tab" {
     var fx = try FlipApp.init();
     defer fx.deinit();
     const app = &fx.app;
