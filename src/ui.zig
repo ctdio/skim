@@ -1505,6 +1505,18 @@ pub const UI = struct {
         const focus_copy = try RenderUtils.copyFrameText(app, focus_suffix);
         const view_copy = try prViewIndicator(app);
 
+        // The PR description sits above the first file; naming that file while
+        // the description fills the top of the view is misleading.
+        const top = app.state.line_map.getLineRecord(app.state.global_scroll_offset);
+        if (top != null and top.?.line_type == .pr_description) {
+            var description_segments = [_]vaxis.Cell.Segment{
+                .{ .text = view_copy, .style = .{ .fg = Color.yellow } },
+                .{ .text = focus_copy, .style = .{ .fg = Color.white, .bold = true } },
+            };
+            _ = win.print(&description_segments, .{ .row_offset = 0, .col_offset = @intCast(0) });
+            return;
+        }
+
         // Create segments with different colors
         // The PR view goes first: in a narrow diff pane the row is cut at
         // the right, and the file is also named by its own header line.
@@ -1666,8 +1678,8 @@ pub const UI = struct {
                 const in_review = pr.review_controller.isActive(&app.state.review);
                 if (in_review and app.state.conversation.showing) break :blk "j/k:Move  |  Enter:Thread in diff  |  gc/Esc:Diff  |  ? for help";
                 const sidebar_shown = app.state.sidebar.open and app.state.sidebar.visible;
-                if (sidebar_shown and in_review) break :blk "j/k:Move  |  Tab:PRs  |  gc:Conversation  |  ? for help";
-                if (sidebar_shown) break :blk "j/k:Move  |  Tab:PRs  |  ? for help";
+                if (sidebar_shown and in_review) break :blk "j/k:Move  |  ^w h:PRs  |  gc:Conversation  |  ? for help";
+                if (sidebar_shown) break :blk "j/k:Move  |  ^w h:PRs  |  ? for help";
                 break :blk "j/k:Move  |  ? for help";
             },
             .comment => blk: {

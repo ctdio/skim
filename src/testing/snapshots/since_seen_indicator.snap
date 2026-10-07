@@ -21,4 +21,4 @@
    #740 Standalone change…    • │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else { return "beta"; }
    #739 Standalone change…    • │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { return "beta"; }
                                 │┃
--- NORMAL -- [Unified] [Stdin]  PR #813 [+/-]  File 1/2  j/k:Move  |  Tab:PRs  |  ? for help
+-- NORMAL -- [Unified] [Stdin]  PR #813 [+/-]  File 1/2  j/k:Move  |  ^w h:PRs  |  ? for help

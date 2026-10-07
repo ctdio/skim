@@ -27,4 +27,4 @@
    #734 Standalone change 734       • │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else {
    #733 Standalone change 733      ✓• │┃       return "beta"; }                                                >
                                       │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else {
-DIFF -- NORMAL -- [Unified] [Stdin] [+/-]  File 1/2  j/k:Move  |  Tab:PRs  |  ? for help
+DIFF -- NORMAL -- [Unified] [Stdin] [+/-]  File 1/2  j/k:Move  |  ^w h:PRs  |  ? for help
