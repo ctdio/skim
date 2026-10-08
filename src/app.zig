@@ -236,6 +236,7 @@ pub const App = struct {
         pending_close_bracket: bool, // Waiting for second character after ] (like ]h)
         empty_menu_selection: usize, // Selected index in empty state menu (0 = working, 1 = staged, 2 = main, 3 = branch, 4 = refresh, 5 = quit)
         help_scroll_offset: usize, // Scroll position in help overlay
+        help_return_mode: Mode = .normal, // Mode the help overlay returns to on close
 
         // Branch selection state (loaded list, filtering)
         branch_select: branch_selection_mode.BranchSelectState = .{},
@@ -2010,8 +2011,7 @@ pub const App = struct {
                     return;
                 },
                 .help => {
-                    self.mode = .normal;
-                    self.needs_render = true;
+                    help_mode.close(self);
                     return;
                 },
                 .search => {
@@ -2501,9 +2501,7 @@ pub const App = struct {
                     .side_by_side => .unified,
                 };
             },
-            .show_help => {
-                self.mode = .help;
-            },
+            .show_help => help_mode.open(self, .normal),
             else => {},
         }
 

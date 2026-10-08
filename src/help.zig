@@ -71,8 +71,10 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "zM / zR", .desc = "Close / open all" },
         .{ .key = "[h / ]h", .desc = "Previous / next hunk" },
         .{ .key = "[c / ]c", .desc = "Previous / next comment" },
+        .{ .key = "[s / ]s", .desc = "Parent / child branch in stack" },
         .{ .key = "{ / }", .desc = "Previous / next empty line" },
         .{ .key = "f / t / F / T", .desc = "Find character in line" },
+        .{ .key = ";", .desc = "Repeat last find" },
         .{ .key = "/", .desc = "Search" },
         .{ .key = "n / N", .desc = "Next / previous match" },
         .{ .key = "Ctrl-p", .desc = "File picker" },
@@ -92,10 +94,13 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-w h/l", .desc = "Focus diff / agent" },
         .{ .key = "r", .desc = "Refresh diff (off a comment)" },
         .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
+        .{ .key = "a / A", .desc = "Stage file / all files" },
+        .{ .key = "B", .desc = "Toggle git blame" },
+        .{ .key = "S", .desc = "Graphite stack picker" },
     };
     for (core_bindings) |binding| {
         if (unavailable(binding)) continue;
-        const b = if (app.state.sidebar.open) sidebarOverride(binding) else binding;
+        const b = if (app.state.sidebar.open) sidebarOverride(binding) orelse continue else binding;
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
@@ -177,12 +182,15 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "Δ • ◆", .desc = "Pushed since seen · never seen · cached" },
             .{ .key = "3s preview", .desc = "Marks a never-seen PR seen (Δ needs Enter/Tab/m)" },
             .{ .key = "f", .desc = "Filter menu (presets, toggles, clear)" },
+            .{ .key = "j/k  Enter", .desc = "Filter menu: move / apply (Esc closes)" },
             .{ .key = "/", .desc = "Filter query (author:@me -is:draft ...)" },
+            .{ .key = "^u / ^w", .desc = "Filter prompt: clear / delete word" },
             .{ .key = "F", .desc = "Next filter preset" },
             .{ .key = "R", .desc = "Sync now" },
             .{ .key = "o", .desc = "Open the PR in the browser" },
             .{ .key = "y / Y", .desc = "Yank the PR's branch / URL" },
             .{ .key = "Esc", .desc = "Back: menu/prompt, preset, then close" },
+            .{ .key = "?", .desc = "This help (from the sidebar)" },
         };
         for (sidebar_bindings) |b| {
             try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -196,7 +204,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         const pr_bindings = [_]Binding{
             .{ .key = "R", .desc = "Submit review (verdict + body)" },
             .{ .key = "i", .desc = "PR info panel: checks, reviews, description" },
+            .{ .key = "r", .desc = "Info panel: refetch (i / q / Esc close)" },
             .{ .key = "gc", .desc = "Conversation ⇄ diff (Enter on a thread jumps to it)" },
+            .{ .key = "j / k", .desc = "Conversation: next / previous item" },
+            .{ .key = "gg / G", .desc = "Conversation: top / bottom" },
+            .{ .key = "Enter", .desc = "Conversation: jump to thread in the diff" },
+            .{ .key = "Esc", .desc = "Conversation: back to the diff" },
             .{ .key = "C", .desc = "Comment target: GitHub ⇄ local" },
             .{ .key = "r", .desc = "Refresh diff + refetch threads (off a comment)" },
             .{ .key = "Enter", .desc = "Reply to thread (on thread)" },
@@ -206,6 +219,9 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "o", .desc = "Fold / expand thread (on thread)" },
             .{ .key = "o", .desc = "Fold / expand description (on it)" },
             .{ .key = "✓ ✗ ●", .desc = "Status row: approvals, changes, checks" },
+            .{ .key = "Tab / S-Tab", .desc = "Submit: cycle verdict" },
+            .{ .key = "^s / Enter", .desc = "Submit: send the review" },
+            .{ .key = "^d ^d", .desc = "Submit: discard (press twice)" },
         };
         for (pr_bindings) |b| {
             try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -239,8 +255,11 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     const content_start_row: usize = 2; // After top border + 1 row padding
     const content_end_row = popup_height -| 2; // Before bottom border + footer
     const max_visible = content_end_row -| content_start_row;
-    const scroll_offset = app.state.help_scroll_offset;
     const total_rows = content_lines.items.len;
+    // The key handler scrolls without an upper bound (`G` jumps to maxInt);
+    // only here is the row count known, so the offset is clamped back.
+    app.state.help_scroll_offset = @min(app.state.help_scroll_offset, total_rows -| max_visible);
+    const scroll_offset = app.state.help_scroll_offset;
     const visible_start = scroll_offset;
     const visible_end = @min(visible_start + max_visible, total_rows);
 
@@ -305,6 +324,10 @@ fn unavailable(binding: Binding) bool {
         .{ .key = "r", .desc = "Refresh diff (off a comment)" },
         .{ .key = "r", .desc = "Refresh diff + refetch threads (off a comment)" },
         .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
+        .{ .key = "a / A", .desc = "Stage file / all files" },
+        .{ .key = "B", .desc = "Toggle git blame" },
+        .{ .key = "S", .desc = "Graphite stack picker" },
+        .{ .key = "[s / ]s", .desc = "Parent / child branch in stack" },
     };
     for (web_cannot) |unsupported| {
         if (std.mem.eql(u8, unsupported.key, binding.key) and
@@ -314,9 +337,11 @@ fn unavailable(binding: Binding) bool {
 }
 
 /// Ctrl-b toggles the PR sidebar while it is open, so the diff's page up is
-/// listed under the keys that still reach it.
-fn sidebarOverride(binding: Binding) Binding {
+/// listed under the keys that still reach it. Staging is blocked on a PR diff,
+/// so it is left out (null).
+fn sidebarOverride(binding: Binding) ?Binding {
     if (std.mem.eql(u8, binding.key, "b / Ctrl-b")) return .{ .key = "b / PageUp", .desc = binding.desc };
+    if (std.mem.eql(u8, binding.key, "a / A")) return null;
     return binding;
 }
 

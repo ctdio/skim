@@ -8,6 +8,7 @@ const folds = @import("../folds.zig");
 const hunk_view = @import("../hunk_view.zig");
 const CommentController = @import("../comments/controller.zig").CommentController;
 const review_controller = @import("../pr/review_controller.zig");
+const help_mode = @import("help_mode.zig");
 const pr_review_mode = @import("pr_review_mode.zig");
 
 /// Handle keyboard input when in normal mode
@@ -475,7 +476,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.state.cursor_column = 0; // Reset column on jump
             app.updateCurrentFileAndTriggerHighlighting();
         },
-        '?' => app.mode = .help, // Show help overlay
+        '?' => help_mode.open(app, .normal),
         'a' => try app.stageCurrentFile(), // Stage the current file (git add)
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
         'o' => try toggleExpandUnderCursor(app), // Toggle comment/thread expand/collapse

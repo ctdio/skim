@@ -716,7 +716,7 @@ fn normalKey(app: *App, key: vaxis.Key) !void {
         'd' => try CommentController.deleteCommentUnderCursor(app),
         'D' => try CommentController.clearAllComments(app),
         'o' => CommentController.toggleCommentUnderCursorExpanded(app),
-        '?' => app.mode = .help,
+        '?' => help_mode.open(app, .normal),
         27 => app.mode = .normal,
         else => app.state.count_prefix = null,
     }

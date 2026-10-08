@@ -196,6 +196,7 @@ the diff.
 | `y`                      | Yank the selected PR's head branch name                                                                         |
 | `Y`                      | Yank the selected PR's URL                                                                                      |
 | `Ctrl-b`                 | Hide / show the sidebar                                                                                         |
+| `?`                      | Keybindings help (closing it returns to the sidebar)                                                            |
 | `Esc` / `Ctrl-c`         | Back: close the menu or prompt, restore the preset, then exit (`skim pr`) or return to the working diff (`:pr`) |
 
 In the row's marker column, `Δ` means the PR was pushed to since you saw it,

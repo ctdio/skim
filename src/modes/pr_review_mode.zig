@@ -12,6 +12,7 @@ const clipboard = @import("../clipboard.zig");
 const conversation_state = @import("../pr/conversation/state.zig");
 const flip = @import("../pr/flip.zig");
 const flip_controller = @import("../pr/flip_controller.zig");
+const help_mode = @import("help_mode.zig");
 const Layout = @import("../rendering/common.zig").Layout;
 const Navigation = @import("../navigation.zig").Navigation;
 const review_controller = @import("../pr/review_controller.zig");
@@ -98,6 +99,7 @@ pub fn handleKey(app: *App, key: Key) !void {
         'o' => pr_surface.openInBrowser(&app.state.pr_surface, sb),
         'y' => yank(app, .branch),
         'Y' => yank(app, .url),
+        '?' => help_mode.open(app, .pr_review),
         Key.escape => try app.prSidebarBack(),
         else => {},
     }

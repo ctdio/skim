@@ -1622,6 +1622,115 @@ test "help: with the sidebar closed, Tab and Ctrl-b are listed for the diff" {
     try testing.expect(std.mem.indexOf(u8, bottom, "Shift-Tab") == null);
 }
 
+test "help: G scrolls to the last row with the PR sections listed" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+    app.state.review.active = true;
+    try app.handleKey(.{ .codepoint = '?' });
+    try app.handleKey(.{ .codepoint = 'G' });
+
+    const text = try helpText(&app, app.state.help_scroll_offset);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "Agent help (detailed)") != null);
+}
+
+test "help: j past the bottom does not bank rows k must scroll back through" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+    app.state.review.active = true;
+    try app.handleKey(.{ .codepoint = '?' });
+    try app.handleKey(.{ .codepoint = 'G' });
+    testing.allocator.free(try helpText(&app, app.state.help_scroll_offset));
+    try app.handleKey(.{ .codepoint = 'j' });
+    testing.allocator.free(try helpText(&app, app.state.help_scroll_offset));
+    try app.handleKey(.{ .codepoint = 'k' });
+
+    const text = try helpText(&app, app.state.help_scroll_offset);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "Agent help (detailed)") == null);
+}
+
+test "help: ? with the sidebar focused opens the overlay" {
+    var app = try sidebarApp();
+    defer app.deinit();
+
+    try app.handleKey(.{ .codepoint = '?' });
+
+    try testing.expectEqual(root.App.Mode.help, app.mode);
+}
+
+test "help: closing the overlay opened from the sidebar refocuses the sidebar" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = '?' });
+
+    try app.handleKey(.{ .codepoint = Key.escape });
+
+    try testing.expectEqual(root.App.Mode.pr_review, app.mode);
+}
+
+test "help: closing the overlay opened from the diff refocuses the diff" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = '?' });
+    try app.handleKey(.{ .codepoint = Key.escape });
+    app.mode = .normal;
+    try app.handleKey(.{ .codepoint = '?' });
+
+    try app.handleKey(.{ .codepoint = 'q' });
+
+    try testing.expectEqual(root.App.Mode.normal, app.mode);
+}
+
+test "help: the PR sections list the menu, prompt, conversation, info and submit keys" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+    app.state.review.active = true;
+
+    const text = try helpAllText(&app);
+    defer testing.allocator.free(text);
+
+    const expected = [_][]const u8{
+        "Filter menu: move / apply",
+        "Filter prompt: clear / delete word",
+        "Conversation: next / prev",
+        "Conversation: top / bottom",
+        "Conversation: jump to thread",
+        "Info panel: refetch",
+        "Submit: cycle verdict",
+        "Submit: discard (press twice)",
+    };
+    for (expected) |row| {
+        try testing.expect(std.mem.indexOf(u8, text, row) != null);
+    }
+}
+
+test "help: the diff lists blame, stack navigation and find repeat" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+    app.state.sidebar.open = false;
+
+    const text = try helpAllText(&app);
+    defer testing.allocator.free(text);
+
+    const expected = [_][]const u8{ "Toggle git blame", "Graphite stack picker", "Parent / child branch in stack", "Repeat last find", "Stage file / all files" };
+    for (expected) |row| {
+        try testing.expect(std.mem.indexOf(u8, text, row) != null);
+    }
+}
+
+test "help: staging is left out while a PR diff is open" {
+    var app = try diffFocusedApp();
+    defer app.deinit();
+
+    const text = try helpAllText(&app);
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "Stage file / all files") == null);
+}
+
 test "filter menu: Ctrl-n and Ctrl-p move the cursor down and up" {
     var app = try sidebarApp();
     defer app.deinit();
@@ -3029,6 +3138,19 @@ fn helpText(app: *root.App, scroll: usize) ![]const u8 {
     app.state.help_scroll_offset = scroll;
     try root.help.renderHelpPopup(app, ctx.window());
     return ctx.captureToText();
+}
+
+/// Every help popup row: the popup's pages, scrolled through and concatenated.
+fn helpAllText(app: *root.App) ![]const u8 {
+    var all: std.ArrayList(u8) = .empty;
+    errdefer all.deinit(testing.allocator);
+    var scroll: usize = 0;
+    while (scroll < 300) : (scroll += 20) {
+        const page = try helpText(app, scroll);
+        defer testing.allocator.free(page);
+        try all.appendSlice(testing.allocator, page);
+    }
+    return all.toOwnedSlice(testing.allocator);
 }
 
 fn viewParams(frame_allocator: Allocator) controller.ViewParams {
