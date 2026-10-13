@@ -189,6 +189,7 @@ pub fn resetPerPrViewState(ctx: Ctx) void {
 pub fn tick(ctx: Ctx, now_ms: i64) void {
     const sb = ctx.sidebar;
     if (pr_surface.poll(ctx.surface, .{ .allocator = ctx.allocator, .sidebar = sb })) ctx.needs_render.* = true;
+    landCachedRead(ctx);
     if (!sb.open) return;
     if (sidebar_controller.takeCursorChanged(sb)) {
         const selected = sidebar_controller.selectedPr(sb);
@@ -217,6 +218,8 @@ pub fn tick(ctx: Ctx, now_ms: i64) void {
 /// diff is there (no subprocess), else start a streaming load.
 pub fn previewPr(ctx: Ctx, number: u32) void {
     const record = sidebar_controller.recordByNumber(ctx.sidebar, number) orelse return;
+    // The newest preview wins over a cached read still landing.
+    ctx.flip.cache_wanted = null;
     // The editor belongs to the diff on screen: the flip waits for it to
     // close (`tick`), then lands on the cursor's PR.
     if (refuseForOpenEditor(ctx)) {
@@ -236,6 +239,7 @@ pub fn previewPr(ctx: Ctx, number: u32) void {
     };
     switch (plan) {
         .miss => previewMiss(ctx, record),
+        .read => |key| readCached(ctx, record, key),
         .hit => |*hit| {
             defer if (hit.threads) |threads| threads.deinit(ctx.allocator);
             installPrDiff(ctx, .{
@@ -466,6 +470,50 @@ fn previewMiss(ctx: Ctx, record: *const types.PrRecord) void {
         abandonMissPreview(ctx);
         ctx.host.show_error(ctx.host.ptr, "failed to load the PR diff");
     };
+}
+
+/// Read `record`'s DB-cached diff off the UI thread; `landCachedRead` shows
+/// it. The diff on screen stays until then. While another PR's read runs,
+/// this one starts when that one lands.
+fn readCached(ctx: Ctx, record: *const types.PrRecord, key: types.DiffKey) void {
+    ctx.flip.cache_wanted = record.number;
+    if (pr_surface.cachedReadNumber(ctx.surface) != null) return;
+    pr_surface.startCachedRead(ctx.surface, .{ .allocator = ctx.allocator, .number = record.number, .key = key, .now = skim_io.timestamp() }) catch |err| {
+        std.log.warn("pr flip: reading cached #{d} failed to start: {any}", .{ record.number, err });
+        ctx.flip.cache_wanted = null;
+        previewMiss(ctx, record);
+    };
+}
+
+/// A cached read finished: park its diff in the LRU, then preview the PR
+/// the user is waiting on, which installs from the LRU (or starts its own
+/// read, when the user moved on meanwhile).
+fn landCachedRead(ctx: Ctx) void {
+    const landed = pr_surface.pollCachedRead(ctx.surface) orelse return;
+    const read_ok = switch (landed.outcome) {
+        .files => |files| parked: {
+            const lru = if (ctx.flip.lru) |*lru| lru else {
+                freeParsedFiles(ctx.allocator, files);
+                break :parked false;
+            };
+            lru.put(landed.key, files);
+            break :parked true;
+        },
+        .missing => false,
+        .failed => |err| failed: {
+            std.log.warn("pr flip: reading cached #{d} failed: {any}", .{ landed.number, err });
+            break :failed false;
+        },
+    };
+    const wanted = ctx.flip.cache_wanted orelse return;
+    ctx.needs_render.* = true;
+    // Planning again would only read the same row again.
+    if (wanted == landed.number and !read_ok) {
+        ctx.flip.cache_wanted = null;
+        const record = sidebar_controller.recordByNumber(ctx.sidebar, wanted) orelse return;
+        return previewMiss(ctx, record);
+    }
+    previewPr(ctx, wanted);
 }
 
 fn startLocalPrLoad(ctx: Ctx, params: struct { record: *const types.PrRecord, view: flip.DiffView }) !void {

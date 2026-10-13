@@ -175,6 +175,82 @@ const CommentIndex = struct {
     }
 };
 
+/// Review threads sorted into diff order, so emitting a file or line's
+/// threads walks a cursor instead of scanning every thread per line. The
+/// sorts are stable: threads sharing a spot keep their anchored order.
+const ThreadIndex = struct {
+    inline_threads: []thread_placement.AnchoredThread = &.{},
+    bucket_threads: []thread_placement.AnchoredThread = &.{},
+    next_inline: usize = 0,
+    next_bucket: usize = 0,
+
+    const Coord = struct { file_idx: usize, hunk_idx: usize, line_idx: usize };
+
+    /// Threads placed in `files[first_file..]`; the rest are never emitted.
+    fn build(allocator: Allocator, anchored: ?[]const thread_placement.AnchoredThread, first_file: usize) !ThreadIndex {
+        const all = anchored orelse return .{};
+        var inline_list: std.ArrayList(thread_placement.AnchoredThread) = .empty;
+        errdefer inline_list.deinit(allocator);
+        var bucket_list: std.ArrayList(thread_placement.AnchoredThread) = .empty;
+        errdefer bucket_list.deinit(allocator);
+        for (all) |a| switch (a.placement) {
+            .inline_line => |c| if (c.file_idx >= first_file) try inline_list.append(allocator, a),
+            .file_bucket => |b| if (b.file_idx >= first_file) try bucket_list.append(allocator, a),
+            .unplaced => {},
+        };
+        std.sort.block(thread_placement.AnchoredThread, inline_list.items, {}, inlineBefore);
+        std.sort.block(thread_placement.AnchoredThread, bucket_list.items, {}, bucketBefore);
+        const inline_threads = try inline_list.toOwnedSlice(allocator);
+        errdefer allocator.free(inline_threads);
+        return .{ .inline_threads = inline_threads, .bucket_threads = try bucket_list.toOwnedSlice(allocator) };
+    }
+
+    fn deinit(self: *ThreadIndex, allocator: Allocator) void {
+        allocator.free(self.inline_threads);
+        allocator.free(self.bucket_threads);
+    }
+
+    fn count(self: *const ThreadIndex) usize {
+        return self.inline_threads.len + self.bucket_threads.len;
+    }
+
+    /// The bucket threads of `file_idx`. Files must be asked in order.
+    fn takeBucket(self: *ThreadIndex, file_idx: usize) []const thread_placement.AnchoredThread {
+        while (self.next_bucket < self.bucket_threads.len and self.bucket_threads[self.next_bucket].placement.file_bucket.file_idx < file_idx) self.next_bucket += 1;
+        const start = self.next_bucket;
+        while (self.next_bucket < self.bucket_threads.len and self.bucket_threads[self.next_bucket].placement.file_bucket.file_idx == file_idx) self.next_bucket += 1;
+        return self.bucket_threads[start..self.next_bucket];
+    }
+
+    /// The inline threads anchored at `at`. Lines must be asked in diff
+    /// order; threads on lines never asked for (folded, filtered) are skipped.
+    fn takeInline(self: *ThreadIndex, at: Coord) []const thread_placement.AnchoredThread {
+        while (self.next_inline < self.inline_threads.len and coordLess(inlineCoord(self.inline_threads[self.next_inline]), at)) self.next_inline += 1;
+        const start = self.next_inline;
+        while (self.next_inline < self.inline_threads.len and std.meta.eql(inlineCoord(self.inline_threads[self.next_inline]), at)) self.next_inline += 1;
+        return self.inline_threads[start..self.next_inline];
+    }
+
+    fn inlineCoord(a: thread_placement.AnchoredThread) Coord {
+        const c = a.placement.inline_line;
+        return .{ .file_idx = c.file_idx, .hunk_idx = c.hunk_idx, .line_idx = c.line_idx };
+    }
+
+    fn coordLess(a: Coord, b: Coord) bool {
+        if (a.file_idx != b.file_idx) return a.file_idx < b.file_idx;
+        if (a.hunk_idx != b.hunk_idx) return a.hunk_idx < b.hunk_idx;
+        return a.line_idx < b.line_idx;
+    }
+
+    fn inlineBefore(_: void, a: thread_placement.AnchoredThread, b: thread_placement.AnchoredThread) bool {
+        return coordLess(inlineCoord(a), inlineCoord(b));
+    }
+
+    fn bucketBefore(_: void, a: thread_placement.AnchoredThread, b: thread_placement.AnchoredThread) bool {
+        return a.placement.file_bucket.file_idx < b.placement.file_bucket.file_idx;
+    }
+};
+
 /// Complete map of all lines in the diff
 pub const LineMap = struct {
     records: []LineRecord,
@@ -354,10 +430,21 @@ pub const LineMap = struct {
         const hunk_view_mode = params.hunk_view_mode;
         const apply_filtering = params.apply_filtering;
         const collapsed_folds = params.collapsed_folds;
-        const review_threads = params.review_threads;
 
         var comment_index = try CommentIndex.build(allocator, comment_store);
         defer comment_index.deinit(allocator);
+        var threads = try ThreadIndex.build(allocator, params.review_threads, params.first_new);
+        defer threads.deinit(allocator);
+
+        // One allocation for the whole range: growing record by record
+        // reallocates and copies a multi-megabyte buffer over and over on a
+        // large diff.
+        try records.ensureUnusedCapacity(allocator, maxRangeRecords(.{
+            .files = files[params.first_new..],
+            .pr_description = if (params.first_new == 0 and files.len > 0) params.pr_description else null,
+            .comment_count = comment_store.comments.items.len,
+            .thread_count = threads.count(),
+        }));
 
         var global_line = params.global_line.*;
         defer params.global_line.* = global_line;
@@ -432,24 +519,16 @@ pub const LineMap = struct {
             // File-level bucket threads (outdated / out-of-context / file-subject)
             // render directly under the header, before the first hunk. Input
             // order == anchored order == thread creation order (stable).
-            if (review_threads) |anchored| {
-                for (anchored) |a| {
-                    switch (a.placement) {
-                        .file_bucket => |b| {
-                            if (b.file_idx != file_idx) continue;
-                            try records.append(allocator, .{
-                                .global_line = global_line,
-                                .file_idx = file_idx,
-                                .line_type = .{ .review_thread = .{
-                                    .thread_idx = a.thread_idx,
-                                    .placement = .file_bucket,
-                                } },
-                            });
-                            global_line += 1;
-                        },
-                        else => {},
-                    }
-                }
+            for (threads.takeBucket(file_idx)) |a| {
+                try records.append(allocator, .{
+                    .global_line = global_line,
+                    .file_idx = file_idx,
+                    .line_type = .{ .review_thread = .{
+                        .thread_idx = a.thread_idx,
+                        .placement = .file_bucket,
+                    } },
+                });
+                global_line += 1;
             }
 
             // Add hunks and their lines
@@ -520,24 +599,16 @@ pub const LineMap = struct {
                     // Inline review threads anchored to this coordinate render
                     // below any local comment. N threads per line is legal —
                     // emit every match consecutively in anchored (input) order.
-                    if (review_threads) |anchored| {
-                        for (anchored) |a| {
-                            switch (a.placement) {
-                                .inline_line => |c| {
-                                    if (c.file_idx != file_idx or c.hunk_idx != hunk_idx or c.line_idx != line_idx_in_hunk) continue;
-                                    try records.append(allocator, .{
-                                        .global_line = global_line,
-                                        .file_idx = file_idx,
-                                        .line_type = .{ .review_thread = .{
-                                            .thread_idx = a.thread_idx,
-                                            .placement = .inline_line,
-                                        } },
-                                    });
-                                    global_line += 1;
-                                },
-                                else => {},
-                            }
-                        }
+                    for (threads.takeInline(.{ .file_idx = file_idx, .hunk_idx = hunk_idx, .line_idx = line_idx_in_hunk })) |a| {
+                        try records.append(allocator, .{
+                            .global_line = global_line,
+                            .file_idx = file_idx,
+                            .line_type = .{ .review_thread = .{
+                                .thread_idx = a.thread_idx,
+                                .placement = .inline_line,
+                            } },
+                        });
+                        global_line += 1;
                     }
                 }
             }
@@ -705,6 +776,20 @@ pub const LineMap = struct {
         return null;
     }
 };
+
+/// The most records `appendRange` can emit for `files`: every line visible,
+/// every comment and thread placed. Folds and the hunk view only drop records.
+fn maxRangeRecords(params: struct { files: []const parser.FileDiff, pr_description: ?DescriptionLayout, comment_count: usize, thread_count: usize }) usize {
+    // Header, header spacer, and the trailing (or, when streamed, leading) spacers.
+    const per_file = 2 + file_spacing;
+    var total = params.files.len * per_file + params.comment_count + params.thread_count;
+    for (params.files) |file| {
+        total += file.hunks.len;
+        for (file.hunks) |hunk| total += hunk.lines.len;
+    }
+    if (params.pr_description) |layout| total += layout.line_count + 2 + description_spacing;
+    return total;
+}
 
 test "line map basic construction" {
     const allocator = std.testing.allocator;
@@ -1254,6 +1339,82 @@ test "appending the rest of a diff matches building it all at once" {
     try std.testing.expectEqual(whole.getTotalLines(), grown.getTotalLines());
     try std.testing.expectEqualDeep(whole.records, grown.records);
     try std.testing.expectEqualSlices(usize, whole.file_header_lines, grown.file_header_lines);
+}
+
+/// Threads listed out of diff order: file 3's thread first, then two on
+/// file 1's added line, then file 2's bucket thread.
+const unordered_threads = [_]thread_placement.AnchoredThread{
+    .{ .thread_idx = 0, .placement = .{ .inline_line = .{ .file_idx = 2, .hunk_idx = 0, .line_idx = 2 } } },
+    .{ .thread_idx = 1, .placement = .{ .inline_line = .{ .file_idx = 0, .hunk_idx = 0, .line_idx = 1 } } },
+    .{ .thread_idx = 2, .placement = .{ .inline_line = .{ .file_idx = 0, .hunk_idx = 0, .line_idx = 1 } } },
+    .{ .thread_idx = 3, .placement = .{ .file_bucket = .{ .file_idx = 1, .reason = .outdated } } },
+    .{ .thread_idx = 4, .placement = .unplaced },
+};
+
+test "threads listed out of diff order land under their own lines" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = &unordered_threads });
+    defer map.deinit();
+
+    const gain = map.findLineByThreadIdx(0).?;
+    try std.testing.expectEqualDeep(LineType{ .code_line = .{ .hunk_idx = 0, .line_idx_in_hunk = 2 } }, map.records[gain - 1].line_type);
+    try std.testing.expectEqual(@as(usize, 2), map.records[gain - 1].file_idx);
+    const new_line = map.findLineByThreadIdx(1).?;
+    try std.testing.expectEqualDeep(LineType{ .code_line = .{ .hunk_idx = 0, .line_idx_in_hunk = 1 } }, map.records[new_line - 1].line_type);
+    try std.testing.expectEqual(@as(usize, 0), map.records[new_line - 1].file_idx);
+    try std.testing.expectEqual(new_line + 1, map.findLineByThreadIdx(2).?);
+    const bucket = map.findLineByThreadIdx(3).?;
+    try std.testing.expectEqual(map.file_header_lines[1] + 2, bucket);
+    try std.testing.expect(map.findLineByThreadIdx(4) == null);
+}
+
+test "a thread on a line the hunk view hides is not emitted" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+    const on_deleted_line = [_]thread_placement.AnchoredThread{
+        .{ .thread_idx = 0, .placement = .{ .inline_line = .{ .file_idx = 0, .hunk_idx = 0, .line_idx = 0 } } },
+        .{ .thread_idx = 1, .placement = .{ .inline_line = .{ .file_idx = 0, .hunk_idx = 0, .line_idx = 1 } } },
+    };
+
+    var map = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .new, .apply_filtering = true, .review_threads = &on_deleted_line });
+    defer map.deinit();
+
+    try std.testing.expect(map.findLineByThreadIdx(0) == null);
+    try std.testing.expect(map.findLineByThreadIdx(1) != null);
+}
+
+test "appending files with review threads matches building it all at once" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var whole = try LineMap.build(allocator, .{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = &unordered_threads });
+    defer whole.deinit();
+    var grown = try LineMap.build(allocator, .{ .files = files[0..1], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = &unordered_threads });
+    defer grown.deinit();
+    try grown.appendFiles(.{ .files = files[0..2], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = &unordered_threads });
+    try grown.appendFiles(.{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true, .review_threads = &unordered_threads });
+
+    try std.testing.expectEqualDeep(whole.records, grown.records);
 }
 
 test "appending one file at a time matches building it all at once" {

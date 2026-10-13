@@ -19,6 +19,7 @@ const sidebar_state = @import("sidebar/state.zig");
 const prefetch = @import("prefetch/prefetch.zig");
 const priority = @import("prefetch/priority.zig");
 const ParsedLru = @import("prefetch/parsed_lru.zig").ParsedLru;
+const cached_read = @import("prefetch/cached_read.zig");
 const parser = @import("../git/parser.zig");
 const comments = @import("../comments/store.zig");
 const flip = @import("flip.zig");
@@ -53,6 +54,18 @@ pub const Surface = struct {
     targets_allocator: ?Allocator = null,
     /// `OpenParams.gh_bin`, borrowed while open; `openInBrowser` runs it.
     gh_bin: []const u8 = "gh",
+    /// The DB `openAt` opened, for connections off the UI thread.
+    db_path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    db_path_len: usize = 0,
+    /// The cached diff being read off the UI thread, at most one at a time.
+    cached_read: ?*cached_read.CachedRead = null,
+};
+
+/// A cached read that finished (`pollCachedRead`).
+pub const LandedRead = struct {
+    number: u32,
+    key: DiffKey,
+    outcome: cached_read.Outcome,
 };
 
 pub const OpenParams = struct {
@@ -152,12 +165,15 @@ pub const FlipHit = struct {
 
 pub const FlipPlan = union(enum) {
     hit: FlipHit,
+    /// The diff is cached in the DB only: read it off the UI thread
+    /// (`startCachedRead`), then plan again.
+    read: DiffKey,
     miss,
 
     pub fn deinit(self: *FlipPlan, allocator: Allocator) void {
         switch (self.*) {
             .hit => |*hit| hit.deinit(allocator),
-            .miss => {},
+            .read, .miss => {},
         }
     }
 };
@@ -308,6 +324,10 @@ pub fn openAt(surface: *Surface, params: OpenAtParams) void {
         return failDb(sidebar);
     };
     surface.store = db;
+    if (params.db_path.len <= surface.db_path_buf.len) {
+        @memcpy(surface.db_path_buf[0..params.db_path.len], params.db_path);
+        surface.db_path_len = params.db_path.len;
+    }
     surface.repo_id = repo_id;
 
     if (params.filters) |filters| {
@@ -457,8 +477,8 @@ pub fn planFlip(surface: *Surface, params: PlanParams) !FlipPlan {
     if (params.view == .since_seen and !std.ascii.eqlIgnoreCase(&merge_base, inputs.base_tip_oid)) return .miss;
     const key: DiffKey = .{ .merge_base_oid = merge_base, .head_oid = head };
 
-    const taken = if (params.lru) |lru| lru.take(key) else null;
-    const files = taken orelse (try parseCached(surface, .{ .allocator = params.allocator, .inputs = inputs, .now = params.now })) orelse return .miss;
+    const lru = params.lru orelse return .miss;
+    const files = lru.take(key) orelse return if (try db.hasDiff(surface.repo_id, key)) .{ .read = key } else .miss;
     errdefer freeFiles(params.allocator, files);
     const threads = if (params.view == .pr) try db.getThreads(params.allocator, .{ .repo_id = surface.repo_id, .number = params.record.number }) else null;
     return .{ .hit = .{
@@ -468,6 +488,42 @@ pub fn planFlip(surface: *Surface, params: PlanParams) !FlipPlan {
         .threads_fresh = if (threads) |cached| std.mem.eql(u8, cached.pr_updated_at, params.record.updated_at) else false,
         .stack_base_ref = if (whole_stack) items[place.bottom.?].base_ref else params.record.base_ref,
     } };
+}
+
+/// Start reading the DB-cached diff `key` of PR `number` off the UI thread
+/// (a `.read` plan). One read at a time: refuses while another is running.
+pub fn startCachedRead(surface: *Surface, params: struct { allocator: Allocator, number: u32, key: DiffKey, now: i64 }) !void {
+    if (surface.cached_read != null) return error.ReadInFlight;
+    if (surface.store == null or surface.db_path_len == 0) return error.NoStore;
+    surface.cached_read = try cached_read.start(.{
+        .allocator = params.allocator,
+        .db_path = surface.db_path_buf[0..surface.db_path_len],
+        .repo_id = surface.repo_id,
+        .key = params.key,
+        .number = params.number,
+        .now = params.now,
+    });
+}
+
+/// The PR whose cached diff is being read, if any.
+pub fn cachedReadNumber(surface: *const Surface) ?u32 {
+    const read = surface.cached_read orelse return null;
+    return read.number;
+}
+
+pub fn cachedReadDone(surface: *const Surface) bool {
+    const read = surface.cached_read orelse return false;
+    return cached_read.isDone(read);
+}
+
+/// The cached read, once it has finished; the caller owns any parsed files.
+pub fn pollCachedRead(surface: *Surface) ?LandedRead {
+    const read = surface.cached_read orelse return null;
+    if (!cached_read.isDone(read)) return null;
+    surface.cached_read = null;
+    const number = read.number;
+    const key = read.key;
+    return .{ .number = number, .key = key, .outcome = cached_read.finish(read) };
 }
 
 /// AD-9: mark PR `number` seen at its current head, then reload so the
@@ -648,6 +704,13 @@ pub fn openInBrowser(surface: *const Surface, sidebar: *const SidebarState) void
 /// Stop both workers and close the store.
 pub fn close(surface: *Surface) void {
     stopWorkers(surface);
+    if (surface.cached_read) |read| {
+        const allocator = read.allocator;
+        switch (cached_read.finish(read)) {
+            .files => |files| freeFiles(allocator, files),
+            .missing, .failed => {},
+        }
+    }
     if (surface.targets_allocator) |allocator| surface.targets.deinit(allocator);
     if (surface.store) |*db| db.close();
     surface.* = .{};
@@ -758,13 +821,6 @@ fn refreshCached(surface: *Surface, params: ReloadParams) !void {
         const inputs = priority.diffKeyFor(target, .pr) orelse continue;
         if (try prefetch.isCached(db, .{ .repo_id = surface.repo_id, .inputs = inputs })) try cached.put(params.allocator, target.number, {});
     }
-}
-
-fn parseCached(surface: *Surface, params: struct { allocator: Allocator, inputs: priority.KeyInputs, now: i64 }) !?[]parser.FileDiff {
-    const db = if (surface.store) |*s| s else return null;
-    const cached = (try prefetch.lookupCached(db, .{ .allocator = params.allocator, .repo_id = surface.repo_id, .inputs = params.inputs, .now = params.now })) orelse return null;
-    defer params.allocator.free(cached.bytes);
-    return try parser.parse(params.allocator, cached.bytes);
 }
 
 fn writeSeen(surface: *Surface, params: SeenParams) !void {

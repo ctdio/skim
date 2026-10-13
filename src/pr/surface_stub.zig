@@ -70,6 +70,7 @@ pub const FlipHit = struct {
 
 pub const FlipPlan = union(enum) {
     hit: FlipHit,
+    read: types.DiffKey,
     miss,
 
     pub fn deinit(self: *FlipPlan, allocator: Allocator) void {
@@ -153,6 +154,33 @@ pub fn planFlip(surface: *Surface, params: PlanParams) !FlipPlan {
     _ = surface;
     _ = params;
     return .miss;
+}
+
+pub const LandedRead = struct {
+    number: u32,
+    key: types.DiffKey,
+    outcome: union(enum) { files: []parser.FileDiff, missing, failed: anyerror },
+};
+
+pub fn startCachedRead(surface: *Surface, params: struct { allocator: Allocator, number: u32, key: types.DiffKey, now: i64 }) !void {
+    _ = surface;
+    _ = params;
+    return error.NoStore;
+}
+
+pub fn cachedReadNumber(surface: *const Surface) ?u32 {
+    _ = surface;
+    return null;
+}
+
+pub fn cachedReadDone(surface: *const Surface) bool {
+    _ = surface;
+    return false;
+}
+
+pub fn pollCachedRead(surface: *Surface) ?LandedRead {
+    _ = surface;
+    return null;
 }
 
 pub fn markSeen(surface: *Surface, params: SeenParams) void {

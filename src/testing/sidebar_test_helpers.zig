@@ -2723,8 +2723,8 @@ test "a miss that fails while the previous entry's diff loads refuses writes unt
     try fx.store().putMergeBase(fx.repoId(), .{ .base_tip_oid = other_oid, .head_oid = oid_a, .merge_base_oid = flip_merge_base });
     try fx.store().putDiff(.{ .repo_id = fx.repoId(), .key = key_a, .bytes = flip_diff_a, .now = now });
     app.previewPr(101);
+    try fx.awaitPreviewed(101);
 
-    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
     try testing.expect(app.localWritesBlocked() == null);
     _ = try app.state.comment_store.add(noteOnAddedA("note-after"));
     root.surface_controller.tick(app.surfaceCtx(), 0);
@@ -2733,6 +2733,44 @@ test "a miss that fails while the previous entry's diff loads refuses writes unt
     try testing.expectEqual(@as(usize, 1), rows.items.len);
     try testing.expectEqualStrings("note-after", rows.items[0].text);
     try fx.awaitEntrySettled();
+}
+
+test "a PR cached only in the DB is read off the UI thread and installs on a later tick" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.cacheDiff(.{ .head_oid = oid_a, .bytes = flip_diff_a });
+
+    app.previewPr(101);
+
+    try testing.expectEqual(@as(?u32, null), app.state.flip.previewed);
+    try fx.awaitPreviewed(101);
+    try testing.expectEqualStrings("a.txt", app.state.files[0].new_path);
+    try testing.expect(app.state.flip.displayed_key != null);
+}
+
+test "moving on while a cached read runs installs the PR moved to, not the one left" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.cacheDiff(.{ .head_oid = oid_a, .bytes = flip_diff_a });
+    try fx.cacheDiff(.{ .head_oid = oid_b, .bytes = flip_diff_b });
+
+    app.previewPr(101);
+    app.previewPr(102);
+
+    try fx.awaitPreviewed(102);
+    try testing.expectEqualStrings("b.txt", app.state.files[0].new_path);
+    try fx.settleCachedReads();
+    try testing.expectEqual(@as(?u32, 102), app.state.flip.previewed);
+}
+
+test "closing the PR surface while a cached read runs frees the read" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    try fx.cacheDiff(.{ .head_oid = oid_a, .bytes = flip_diff_a });
+
+    fx.app.previewPr(101);
 }
 
 test "openPrSurface with a comment editor open leaves no boot PR loading" {
@@ -2787,7 +2825,7 @@ test "markSeen reloads the sidebar: the record's seen head equals its head" {
     try testing.expectEqualStrings(record.head_oid, record.seen_head_oid.?);
 }
 
-test "planFlip: no merge base → miss; merge base without a diff row → miss; both → hit with parsed files" {
+test "planFlip: no merge base → miss; merge base without a diff row → miss; both → read of that key" {
     var fx = try FlipApp.init();
     defer fx.deinit();
     const sb = &fx.app.state.sidebar;
@@ -2802,8 +2840,7 @@ test "planFlip: no merge base → miss; merge base without a diff row → miss; 
 
     var plan = try surface.planFlip(s, plan_params);
     defer plan.deinit(testing.allocator);
-    try testing.expectEqualStrings("a.txt", plan.hit.files[0].new_path);
-    try testing.expectEqualSlices(u8, &key_a.head_oid, &plan.hit.key.head_oid);
+    try testing.expectEqualSlices(u8, &key_a.head_oid, &plan.read.head_oid);
 }
 
 test "closePrSurface saves the PR's notes before leavePrSurface restores the working-tree comments" {
@@ -3460,6 +3497,33 @@ const FlipApp = struct {
             if (waited_ms >= 5000) return error.Timeout;
             skim_io.sleep(std.time.ns_per_ms);
             self.app.pollBackgroundWork();
+        }
+    }
+
+    /// Cache `bytes` in the DB as the `.pr` diff of the PR at `head_oid`
+    /// (based on `other_oid`), as the prefetch worker would.
+    fn cacheDiff(self: *FlipApp, params: struct { head_oid: *const [40]u8, bytes: []const u8 }) !void {
+        try self.store().putMergeBase(self.repoId(), .{ .base_tip_oid = other_oid, .head_oid = params.head_oid, .merge_base_oid = flip_merge_base });
+        try self.store().putDiff(.{ .repo_id = self.repoId(), .key = .{ .merge_base_oid = flip_merge_base.*, .head_oid = params.head_oid.* }, .bytes = params.bytes, .now = now });
+    }
+
+    /// Drive the flip clock until `number` is on screen.
+    fn awaitPreviewed(self: *FlipApp, number: u32) !void {
+        var waited_ms: usize = 0;
+        while (self.app.state.flip.previewed != number) : (waited_ms += 1) {
+            if (waited_ms >= 5000) return error.Timeout;
+            skim_io.sleep(std.time.ns_per_ms);
+            root.surface_controller.tick(self.app.surfaceCtx(), 0);
+        }
+    }
+
+    /// Keep ticking a while longer, so a cached read that would land late
+    /// gets its chance to.
+    fn settleCachedReads(self: *FlipApp) !void {
+        var waited_ms: usize = 0;
+        while (waited_ms < 50) : (waited_ms += 1) {
+            skim_io.sleep(std.time.ns_per_ms);
+            root.surface_controller.tick(self.app.surfaceCtx(), 0);
         }
     }
 

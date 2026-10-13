@@ -60,6 +60,9 @@ pub const FlipState = struct {
     displayed_key: ?types.DiffKey = null,
     /// Miss-path load in flight for this PR.
     loading_number: ?u32 = null,
+    /// The PR whose DB-cached diff the user is waiting on: it shows once a
+    /// read off the UI thread lands. A newer preview replaces it.
+    cache_wanted: ?u32 = null,
     /// The miss-path load was an explicit open (Enter, `skim pr <n>`), so the
     /// diff takes focus when it installs; a preview leaves it on the sidebar.
     focus_diff: bool = false,
@@ -119,7 +122,7 @@ pub fn onCursorMoved(state: *FlipState, params: struct { number: ?u32, now_ms: i
         state.pending = null;
         return;
     };
-    const current = state.loading_number orelse state.previewed;
+    const current = state.loading_number orelse state.cache_wanted orelse state.previewed;
     if (current == number) {
         state.pending = null;
         return;
@@ -135,7 +138,7 @@ pub fn tick(state: *FlipState, now_ms: i64) ?FlipAction {
         return .{ .preview = pending.number };
     }
     const number = state.previewed orelse return null;
-    if (state.dwell_done or state.dwell_hold or state.loading_number != null) return null;
+    if (state.dwell_done or state.dwell_hold or state.loading_number != null or state.cache_wanted != null) return null;
     if (now_ms - state.preview_started_ms < dwell_ms) return null;
     state.dwell_done = true;
     return .{ .mark_seen = number };

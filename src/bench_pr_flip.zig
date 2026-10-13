@@ -297,8 +297,11 @@ fn measureDraw(params: MeasureParams) !Samples {
     return samples;
 }
 
-/// Flip to a PR whose diff is only in the DB: merge base and cached bytes
-/// from SQLite, `parser.parse`, then the install and the frame. PRs are
+/// Flip to a PR whose diff is only in the DB, through the real path:
+/// `previewPr` plans the flip and starts the read, the read + parse runs on
+/// its own thread, and the tick that lands it installs the diff and paints.
+/// Samples are UI-thread time only (plan + start, land + install + paint);
+/// the wall time to the frame, read included, is logged separately. PRs are
 /// visited in order, so the target was never displayed in the last
 /// `ParsedLru.capacity` flips. Includes installPrDiff parking the outgoing
 /// set and, once the LRU is full, evicting the oldest, as a real flip does.
@@ -309,18 +312,34 @@ fn measureFlipDbHit(params: MeasureParams) !Samples {
 
     var samples = try Samples.alloc(params.allocator, params.config.iterations);
     errdefer samples.free(params.allocator);
+    const wall_ns = try params.allocator.alloc(u64, params.config.iterations);
+    defer params.allocator.free(wall_ns);
     for (0..params.config.warmup + params.config.iterations) |iteration| {
         const target = &records[iteration % records.len];
         if (app.state.flip.lru.?.contains(params.fixture.keyOf(target.number))) return error.BenchUnexpectedLruHit;
         params.screen.out.clearRetainingCapacity();
 
+        var wall = try skim_io.Timer.start();
         var timer = try skim_io.Timer.start();
-        try flipTo(params, target);
+        surface_controller.previewPr(app.surfaceCtx(), target.number);
+        var ui_ns = timer.read();
+        try awaitCachedRead(params, target);
+
+        timer = try skim_io.Timer.start();
+        surface_controller.tick(app.surfaceCtx(), 0);
         try params.screen.paint(app);
-        const ns = timer.read();
+        ui_ns += timer.read();
+        const total_ns = wall.read();
         try expectShown(params, target);
-        record(&samples, .{ .iteration = iteration, .warmup = params.config.warmup, .ns = ns, .bytes = params.screen.out.written().len });
+        record(&samples, .{ .iteration = iteration, .warmup = params.config.warmup, .ns = ui_ns, .bytes = params.screen.out.written().len });
+        if (iteration >= params.config.warmup) wall_ns[iteration - params.config.warmup] = total_ns;
     }
+    const wall_summary = budget.summarize(wall_ns);
+    std.log.info("{s: <15} : wall to frame p50={d:.2}ms p95={d:.2}ms (read off the UI thread)", .{
+        budgets.flip_db.label,
+        @as(f64, @floatFromInt(wall_summary.p50)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(wall_summary.p95)) / std.time.ns_per_ms,
+    });
     return samples;
 }
 
@@ -331,8 +350,8 @@ fn measureFlipLruHit(params: MeasureParams) !Samples {
     const records = (app.state.sidebar.records orelse return error.BenchNoRecords).items;
     if (records.len < 2) return error.BenchTooFewPrs;
     const pair = [2]*const PrRecord{ &records[0], &records[records.len / 2] };
-    try flipTo(params, pair[0]);
-    try flipTo(params, pair[1]);
+    try flipFromDb(params, pair[0]);
+    try flipFromDb(params, pair[1]);
 
     var samples = try Samples.alloc(params.allocator, params.config.iterations);
     errdefer samples.free(params.allocator);
@@ -351,9 +370,9 @@ fn measureFlipLruHit(params: MeasureParams) !Samples {
     return samples;
 }
 
-/// `surface_controller.previewPr`'s hit path without the debounce: plan
-/// from the cache, then install. A miss means the fixture did not cache this PR; the bench
-/// fails rather than time (or spawn) the streaming fallback.
+/// `surface_controller.previewPr`'s LRU-hit path without the debounce: plan
+/// from the cache, then install. Anything else means the PR's parsed diff
+/// was not in the LRU; the bench fails rather than time a read or a stream.
 fn flipTo(params: MeasureParams, target: *const PrRecord) !void {
     const app = params.app;
     var plan = try pr_surface.planFlip(&app.state.pr_surface, .{
@@ -365,7 +384,7 @@ fn flipTo(params: MeasureParams, target: *const PrRecord) !void {
         .now = skim_io.timestamp(),
     });
     const hit = switch (plan) {
-        .miss => return error.BenchMiss,
+        .miss, .read => return error.BenchMiss,
         .hit => |*hit| hit,
     };
     defer if (hit.threads) |threads| threads.deinit(params.allocator);
@@ -379,6 +398,22 @@ fn flipTo(params: MeasureParams, target: *const PrRecord) !void {
         .threads_fresh = hit.threads_fresh,
         .stack_base_ref = hit.stack_base_ref,
     });
+}
+
+/// Untimed: show `target` from its DB-cached diff, read + parse included,
+/// or from the LRU when PRs share a diff (`SKIM_BENCH_DIFFS`).
+fn flipFromDb(params: MeasureParams, target: *const PrRecord) !void {
+    surface_controller.previewPr(params.app.surfaceCtx(), target.number);
+    if (params.app.state.flip.previewed == target.number) return;
+    try awaitCachedRead(params, target);
+    surface_controller.tick(params.app.surfaceCtx(), 0);
+}
+
+/// Wait for the cached read `previewPr` started for `target`.
+fn awaitCachedRead(params: MeasureParams, target: *const PrRecord) !void {
+    const surface = &params.app.state.pr_surface;
+    if (pr_surface.cachedReadNumber(surface) != target.number) return error.BenchNoCachedRead;
+    while (!pr_surface.cachedReadDone(surface)) std.atomic.spinLoopHint();
 }
 
 /// Untimed check that a flip put `target`'s whole diff and its review
@@ -547,7 +582,7 @@ fn randomOid(random: std.Random) [40]u8 {
 /// Synthetic diff `index`, with its own file paths and line text, so a flip
 /// between two of them repaints the whole diff pane as a real one does.
 fn buildDiff(a: Allocator, params: struct { spec: bench.SyntheticSpec, index: usize }) ![]const u8 {
-    const text = try bench.buildDiffText(a, params.spec);
+    const text = try bench.loadDiffText(a, params.spec);
     const dir = try std.fmt.allocPrint(a, "src/bench{d}/", .{params.index});
     const renamed = try std.mem.replaceOwned(u8, a, text, "src/bench/", dir);
     const ident = try std.fmt.allocPrint(a, "pr{d}_value_", .{params.index});
