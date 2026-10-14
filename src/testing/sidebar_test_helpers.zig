@@ -43,6 +43,9 @@ const RecSpec = struct {
     my_review_oid: []const u8 = "",
     seen_head_oid: ?[]const u8 = null,
     url: []const u8 = "",
+    additions: u32 = 0,
+    deletions: u32 = 0,
+    changed_files: u32 = 0,
 };
 
 const head_oid = "a" ** 40;
@@ -2960,9 +2963,9 @@ fn records(allocator: Allocator, specs: []const RecSpec) !types.RecordList {
             .base_oid = "",
             .updated_at = "2026-01-01T00:00:00Z",
             .hydrated_at_update = "2026-01-01T00:00:00Z",
-            .additions = 0,
-            .deletions = 0,
-            .changed_files = 0,
+            .additions = spec.additions,
+            .deletions = spec.deletions,
+            .changed_files = spec.changed_files,
             .review_decision = try a.dupe(u8, spec.review_decision),
             .ci = spec.ci,
             .labels = try a.dupe(u8, spec.labels),
@@ -3785,6 +3788,39 @@ test "view: a never-seen PR is unseen; seen at any head is not" {
     try testing.expect(!rows[0].unseen);
     try testing.expect(!rows[1].unseen);
     try testing.expect(rows[2].unseen);
+}
+
+test "view: the status panel describes the PR under the cursor" {
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    var sb = try stateFrom(&.{
+        .{ .number = 2, .head = "b", .ci = .success },
+        .{ .number = 1, .head = "a", .base = "dev", .draft = true, .ci = .failure, .review_decision = "CHANGES_REQUESTED", .seen_head_oid = other_oid, .additions = 120, .deletions = 30, .changed_files = 6 },
+    }, recent_sync);
+    defer controller.deinitState(&sb, testing.allocator);
+    controller.move(&sb, 1);
+
+    const detail = controller.view(&sb, viewParams(frame.allocator())).detail.?;
+
+    try testing.expectEqual(@as(u32, 1), detail.number);
+    try testing.expectEqual(CiStatus.failure, detail.ci);
+    try testing.expectEqual(sidebar_render.ReviewGlyph.changes_requested, detail.review);
+    try testing.expect(detail.is_draft);
+    try testing.expect(detail.changed_since_seen);
+    try testing.expect(!detail.unseen);
+    try testing.expectEqual(@as(u32, 120), detail.additions);
+    try testing.expectEqual(@as(u32, 30), detail.deletions);
+    try testing.expectEqual(@as(u32, 6), detail.changed_files);
+    try testing.expectEqualStrings("dev", detail.base_ref);
+}
+
+test "view: no status panel when no PR is listed" {
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    var sb = try stateFrom(&.{}, recent_sync);
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try testing.expect(controller.view(&sb, viewParams(frame.allocator())).detail == null);
 }
 
 test "snapshot: sidebar_seen_markers" {

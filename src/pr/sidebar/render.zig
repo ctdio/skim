@@ -60,6 +60,20 @@ pub const RowView = struct {
     cache: CacheState = .unknown,
 };
 
+/// The selected PR's status, spelled out in the panel under the list.
+pub const DetailView = struct {
+    number: u32,
+    is_draft: bool,
+    ci: CiStatus,
+    review: ReviewGlyph,
+    changed_since_seen: bool,
+    unseen: bool,
+    additions: u32,
+    deletions: u32,
+    changed_files: u32,
+    base_ref: []const u8,
+};
+
 pub const HeaderView = struct {
     /// Active preset name, or "custom".
     label: []const u8,
@@ -115,6 +129,8 @@ pub const View = struct {
     empty: ?EmptyState = null,
     /// Surface or entry message (e.g. "Loading PR #812…"); replaces the hint.
     message: []const u8 = "",
+    /// The selected PR, for the status panel; null when none is listed.
+    detail: ?DetailView = null,
 };
 
 pub const Columns = struct {
@@ -136,13 +152,17 @@ const selected_bg = Color.list_selected_bg;
 
 const header_rows: u16 = 3;
 const footer_rows: u16 = 1;
+/// Status panel: a rule and three lines of words about the selected PR.
+const detail_rows: u16 = 4;
+/// Sidebar height from which the status panel is drawn.
+const detail_min_height: u16 = 16;
 const tail_glyphs: u16 = 5;
 const max_author_cols: u16 = 10;
 /// Inner width (window minus divider) at which the author column appears.
 const author_min_inner: u16 = 40;
 const min_title_cols: u16 = 6;
 /// Footer key hints in priority order; trailing ones are dropped when narrow.
-const hints = [_][]const u8{ " f:filter", " F:preset", " R:sync", " ^b:hide", " y/Y:yank" };
+const hints = [_][]const u8{ " f:filter", " F:preset", " R:sync", " ?:help", " ^b:hide", " y/Y:yank" };
 const menu_hints = [_][]const u8{ " space:toggle", " enter:apply", " esc:close", " /:query" };
 const prompt_hints = [_][]const u8{ " enter:apply", " esc:cancel", " ^u:clear" };
 /// Box rows besides the items: top border, rule, query, counts, bottom border.
@@ -170,6 +190,9 @@ pub fn draw(win: vaxis.Window, v: View) void {
     } else {
         drawList(.{ .win = body, .top = row, .rows = list_rows, .view = v });
     }
+    if (hasDetail(win.height)) {
+        if (v.detail) |detail| drawDetail(body, .{ .top = win.height - footer_rows - detail_rows, .detail = detail });
+    }
     if (v.menu) |menu| {
         if (win.height > row + 1) drawMenu(.{ .win = body, .top = row, .bottom = win.height - 1, .menu = menu });
     }
@@ -179,7 +202,8 @@ pub fn draw(win: vaxis.Window, v: View) void {
 
 /// Rows left for the PR list in a sidebar `height` rows tall.
 pub fn listRows(height: u16, has_parse_error: bool) usize {
-    const chrome = header_rows + footer_rows + @as(u16, @intFromBool(has_parse_error));
+    const detail: u16 = if (hasDetail(height)) detail_rows else 0;
+    const chrome = header_rows + footer_rows + detail + @as(u16, @intFromBool(has_parse_error));
     return height -| chrome;
 }
 
@@ -504,6 +528,81 @@ fn drawFooter(win: vaxis.Window, v: View) void {
     }
 }
 
+fn hasDetail(height: u16) bool {
+    return height >= detail_min_height;
+}
+
+/// The status panel from row `top`: a rule, then CI and review, seen and
+/// draft, and the size and base, each in words.
+fn drawDetail(win: vaxis.Window, params: struct { top: u16, detail: DetailView }) void {
+    const d = params.detail;
+    const cols = win.width -| 1;
+    drawRule(win, params.top);
+
+    var status = LineWriter.init(.{ .win = win, .row = params.top + 1 });
+    status.text(" ");
+    status.styledText("#", .{ .fg = meta_fg });
+    status.styledUnsigned(d.number, .{ .fg = meta_fg });
+    status.text(" ");
+    writeTruncated(.{ .writer = &status, .text = ciPhrase(d.ci), .cols = cols -| status.col, .style = .{ .fg = ciColor(d.ci) } });
+    writePhrase(&status, .{ .text = reviewPhrase(d.review), .cols = cols, .style = .{ .fg = reviewColor(d.review) } });
+
+    var seen = LineWriter.init(.{ .win = win, .row = params.top + 2 });
+    seen.text(" ");
+    const seen_style = Style{ .fg = if (d.changed_since_seen) Color.yellow else if (d.unseen) accent_fg else meta_fg };
+    writeTruncated(.{ .writer = &seen, .text = seenPhrase(d), .cols = cols -| seen.col, .style = seen_style });
+    if (d.is_draft) writePhrase(&seen, .{ .text = "draft", .cols = cols, .style = .{ .fg = Color.dim_gray } });
+
+    var size = LineWriter.init(.{ .win = win, .row = params.top + 3, .style = .{ .fg = meta_fg } });
+    size.text(" ");
+    // Zero files: the hydrate pass has not filled in the size yet.
+    if (d.changed_files == 0) {
+        size.text("→ ");
+        return writeTruncated(.{ .writer = &size, .text = d.base_ref, .cols = cols -| size.col, .style = .{ .fg = meta_fg } });
+    }
+    size.styledText("+", .{ .fg = Color.diff_sign_add });
+    size.styledUnsigned(d.additions, .{ .fg = Color.diff_sign_add });
+    size.text(" ");
+    size.styledText("−", .{ .fg = Color.diff_sign_delete });
+    size.styledUnsigned(d.deletions, .{ .fg = Color.diff_sign_delete });
+    size.text(" · ");
+    size.unsigned(d.changed_files);
+    size.text(if (d.changed_files == 1) " file → " else " files → ");
+    writeTruncated(.{ .writer = &size, .text = d.base_ref, .cols = cols -| size.col, .style = .{ .fg = meta_fg } });
+}
+
+/// ` · text` after what `writer` already holds, cut to end before `cols`.
+fn writePhrase(writer: *LineWriter, params: struct { text: []const u8, cols: u16, style: Style }) void {
+    if (params.text.len == 0 or writer.col + 3 >= params.cols) return;
+    writer.styledText(" · ", .{ .fg = meta_fg });
+    writeTruncated(.{ .writer = writer, .text = params.text, .cols = params.cols -| writer.col, .style = params.style });
+}
+
+fn ciPhrase(ci: CiStatus) []const u8 {
+    return switch (ci) {
+        .none => "no CI",
+        .pending => "CI running",
+        .success => "CI passing",
+        .failure => "CI failing",
+    };
+}
+
+fn reviewPhrase(review: ReviewGlyph) []const u8 {
+    return switch (review) {
+        .none => "no review yet",
+        .requested_me => "needs your review",
+        .approved_by_me => "you approved",
+        .approved => "approved",
+        .changes_requested => "changes requested",
+    };
+}
+
+fn seenPhrase(d: DetailView) []const u8 {
+    if (d.changed_since_seen) return "new commits since you looked";
+    if (d.unseen) return "not opened yet";
+    return "seen at its latest commit";
+}
+
 fn drawDivider(win: vaxis.Window) void {
     var row: u16 = 0;
     while (row < win.height) : (row += 1) {
@@ -591,9 +690,9 @@ fn toneColor(tone: SyncTone) vaxis.Cell.Color {
 fn reviewGlyph(review: ReviewGlyph) []const u8 {
     return switch (review) {
         .none => " ",
-        .requested_me => "●",
-        .approved_by_me, .approved => "✓",
-        .changes_requested => "±",
+        .requested_me => "?",
+        .approved_by_me, .approved => "▲",
+        .changes_requested => "▼",
     };
 }
 
@@ -616,7 +715,7 @@ fn drawCentered(win: vaxis.Window, row: u16, label: []const u8) void {
 fn ciGlyph(ci: CiStatus) []const u8 {
     return switch (ci) {
         .none => " ",
-        .pending => "•",
+        .pending => "⋯",
         .success => "✓",
         .failure => "✗",
     };
@@ -636,7 +735,7 @@ fn stackGlyph(mark: stack.Mark) []const u8 {
 fn ciColor(ci: CiStatus) vaxis.Cell.Color {
     return switch (ci) {
         .none => meta_fg,
-        .pending => Color.syntax_type,
+        .pending => Color.yellow,
         .success => Color.diff_sign_add,
         .failure => Color.diff_sign_delete,
     };
@@ -726,7 +825,7 @@ test "draw: row shows #number, truncated title with …, author, glyph tail" {
     try testing.expect(rowContains(ts.screen, 3, "Retry fetch"));
     try testing.expect(rowContains(ts.screen, 3, "…"));
     try testing.expect(rowContains(ts.screen, 3, "alice"));
-    try testing.expect(rowContains(ts.screen, 3, "✓●"));
+    try testing.expect(rowContains(ts.screen, 3, "✓?"));
 }
 
 test "draw: author column dropped below 40 inner cols" {
@@ -747,7 +846,7 @@ test "draw: title dropped below 6 cols, #number and glyphs remain" {
 
     try testing.expect(rowContains(ts.screen, 3, "#812"));
     try testing.expect(!rowContains(ts.screen, 3, "Retry"));
-    try testing.expect(rowContains(ts.screen, 3, "✓●"));
+    try testing.expect(rowContains(ts.screen, 3, "✓?"));
 }
 
 test "draw: focused selection draws ▌; unfocused draws no bar" {
@@ -826,9 +925,9 @@ test "drawDiffPlaceholder: shows the message, else Enter: open #n" {
     try testing.expect(rowContains(loading.screen, 3, "Loading PR #812…"));
 }
 
-test "listRows: chrome is three header rows, one footer, plus the error line" {
-    try testing.expectEqual(@as(usize, 16), listRows(20, false));
-    try testing.expectEqual(@as(usize, 15), listRows(20, true));
+test "listRows: chrome is three header rows, one footer, the status panel, plus the error line" {
+    try testing.expectEqual(@as(usize, 12), listRows(20, false));
+    try testing.expectEqual(@as(usize, 11), listRows(20, true));
     try testing.expectEqual(@as(usize, 0), listRows(3, true));
 }
 
@@ -913,6 +1012,115 @@ test "draw: Δ for changed since seen, • for never seen, blank for seen at the
     try testing.expectEqualStrings("Δ", cellAt(&ts, col, 3));
     try testing.expectEqualStrings("•", cellAt(&ts, col, 4));
     try testing.expectEqualStrings(" ", cellAt(&ts, col, 5));
+}
+
+test "draw: CI running is ⋯, so • only ever means never seen" {
+    var ts = try TestScreen.init(50, 8);
+    defer ts.deinit();
+    var running = testRow(.{ .number = 1, .ci = .pending });
+    running.unseen = true;
+    const rows = [_]RowView{running};
+    draw(ts.window(), testView(&rows, .{ .cursor = null }));
+    const tail = rowColumns(50, 5).tail;
+
+    try testing.expectEqualStrings("⋯", cellAt(&ts, tail + 1, 3));
+    try testing.expectEqualStrings("•", cellAt(&ts, tail + 3, 3));
+}
+
+test "draw: review is ? when requested from you, ▲ approved, ▼ changes requested" {
+    var ts = try TestScreen.init(50, 8);
+    defer ts.deinit();
+    const rows = [_]RowView{
+        testRow(.{ .number = 1, .review = .requested_me }),
+        testRow(.{ .number = 2, .review = .approved }),
+        testRow(.{ .number = 3, .review = .approved_by_me }),
+        testRow(.{ .number = 4, .review = .changes_requested }),
+    };
+    draw(ts.window(), testView(&rows, .{ .cursor = null }));
+    const col = rowColumns(50, 5).tail + 2;
+
+    try testing.expectEqualStrings("?", cellAt(&ts, col, 3));
+    try testing.expectEqualStrings("▲", cellAt(&ts, col, 4));
+    try testing.expectEqualStrings("▲", cellAt(&ts, col, 5));
+    try testing.expectEqualStrings("▼", cellAt(&ts, col, 6));
+}
+
+test "draw: a tall sidebar spells out the selected PR's status above the footer" {
+    var ts = try TestScreen.init(44, 16);
+    defer ts.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    var v = testView(&rows, .{});
+    v.detail = .{
+        .number = 812,
+        .is_draft = true,
+        .ci = .failure,
+        .review = .requested_me,
+        .changed_since_seen = true,
+        .unseen = false,
+        .additions = 120,
+        .deletions = 30,
+        .changed_files = 6,
+        .base_ref = "main",
+    };
+    draw(ts.window(), v);
+
+    try testing.expect(rowContains(ts.screen, 11, "─"));
+    try testing.expect(rowContains(ts.screen, 12, "#812 CI failing · needs your review"));
+    try testing.expect(rowContains(ts.screen, 13, "new commits since you looked · draft"));
+    try testing.expect(rowContains(ts.screen, 14, "+120 −30 · 6 files → main"));
+    try testing.expect(rowContains(ts.screen, 15, "f:filter"));
+}
+
+test "draw: the status panel words every CI and review state" {
+    var ts = try TestScreen.init(60, 16);
+    defer ts.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    var v = testView(&rows, .{});
+    v.detail = .{ .number = 1, .is_draft = false, .ci = .pending, .review = .approved_by_me, .changed_since_seen = false, .unseen = true, .additions = 1, .deletions = 0, .changed_files = 1, .base_ref = "dev" };
+    draw(ts.window(), v);
+
+    try testing.expect(rowContains(ts.screen, 12, "#1 CI running · you approved"));
+    try testing.expect(rowContains(ts.screen, 13, "not opened yet"));
+    try testing.expect(rowContains(ts.screen, 14, "+1 −0 · 1 file → dev"));
+}
+
+test "draw: a PR whose size has not synced yet shows only its base" {
+    var ts = try TestScreen.init(44, 16);
+    defer ts.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    var v = testView(&rows, .{});
+    v.detail = .{ .number = 1, .is_draft = false, .ci = .none, .review = .none, .changed_since_seen = false, .unseen = false, .additions = 0, .deletions = 0, .changed_files = 0, .base_ref = "main" };
+    draw(ts.window(), v);
+
+    try testing.expect(rowContains(ts.screen, 12, "#1 no CI · no review yet"));
+    try testing.expect(rowContains(ts.screen, 13, "seen at its latest commit"));
+    try testing.expect(rowContains(ts.screen, 14, " → main"));
+    try testing.expect(!rowContains(ts.screen, 14, "files"));
+}
+
+test "listRows: the status panel takes 4 rows from a sidebar 16+ tall, none below" {
+    try testing.expectEqual(@as(usize, 15 - 4), listRows(15, false));
+    try testing.expectEqual(@as(usize, 16 - 4 - 4), listRows(16, false));
+}
+
+test "draw: a short sidebar has no status panel" {
+    var ts = try TestScreen.init(44, 8);
+    defer ts.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    var v = testView(&rows, .{});
+    v.detail = .{ .number = 812, .is_draft = false, .ci = .failure, .review = .none, .changed_since_seen = false, .unseen = false, .additions = 0, .deletions = 0, .changed_files = 0, .base_ref = "main" };
+    draw(ts.window(), v);
+
+    for (0..8) |row| try testing.expect(!rowContains(ts.screen, @intCast(row), "CI failing"));
+}
+
+test "draw: the footer points at ?:help for what the symbols mean" {
+    var ts = try TestScreen.init(60, 8);
+    defer ts.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    draw(ts.window(), testView(&rows, .{}));
+
+    try testing.expect(rowContains(ts.screen, 7, "?:help"));
 }
 
 test "draw: an open prompt swaps the footer for its editing hints" {

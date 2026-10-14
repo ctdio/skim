@@ -7,4 +7,4 @@
              f: change filter              │
                                            │
                                            │
- f:filter F:preset R:sync ^b:hide y/Y:yank │
+ f:filter F:preset R:sync ?:help ^b:hide   │

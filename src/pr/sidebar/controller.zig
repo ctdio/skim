@@ -601,6 +601,7 @@ pub fn view(state: *const SidebarState, params: ViewParams) render.View {
         .sync_tone = sync.tone,
         .empty = emptyState(state, state.rows.items.len),
         .message = state.messageText(),
+        .detail = detailOf(state),
     };
 }
 
@@ -973,6 +974,26 @@ fn reviewGlyphOf(record: *const PrRecord, ctx: filter_query.EvalContext) render.
     if (std.mem.eql(u8, record.review_decision, "APPROVED")) return .approved;
     if (std.mem.eql(u8, record.review_decision, "CHANGES_REQUESTED")) return .changes_requested;
     return .none;
+}
+
+/// The cursor row's PR (a stack header's review target) for the status panel.
+fn detailOf(state: *const SidebarState) ?render.DetailView {
+    if (state.unavailable != .none or state.cursor >= state.rows.items.len) return null;
+    const records = state.records orelse return null;
+    const record = &records.items[state.rows.items[state.cursor].record];
+    const ctx = filter_query.EvalContext{ .viewer_login = state.viewer_login, .viewer_teams = state.viewer_teams };
+    return .{
+        .number = record.number,
+        .is_draft = record.is_draft,
+        .ci = record.ci,
+        .review = reviewGlyphOf(record, ctx),
+        .changed_since_seen = changedSinceSeen(record),
+        .unseen = record.seen_head_oid == null,
+        .additions = record.additions,
+        .deletions = record.deletions,
+        .changed_files = record.changed_files,
+        .base_ref = record.base_ref,
+    };
 }
 
 fn changedSinceSeen(record: *const PrRecord) bool {

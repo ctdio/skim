@@ -213,10 +213,15 @@ info, comment target, refresh), each with its key.
 | `?`                      | Keybindings help (closing it returns to the sidebar)                                                            |
 | `Esc` / `Ctrl-c`         | Back: close the menu or prompt, restore the preset, then exit (`skim pr`) or return to the working diff (`:pr`) |
 
-In the row's marker column, `Δ` means the PR was pushed to since you saw it,
-`•` that you have never seen it, and `◆` that its diff is cached. A PR you have
-never seen counts as seen after 3s of preview; one showing `Δ` keeps it until
-you focus its diff (`Enter`, `Tab`, `Ctrl-w l`) or press `m`.
+Each row ends in status columns: `D` for a draft; CI as `✓` passing, `✗`
+failing or `⋯` running; review as `?` needs your review, `▲` approved or `▼`
+changes requested; `Δ` for new commits since you looked or `•` for never
+opened; and `◆` when its diff is downloaded. On a sidebar 16 rows or taller, a
+panel under the list spells out the selected PR's status in words, with its
+size and base branch. `?` lists the symbols too.
+
+A PR you have never seen counts as seen after 3s of preview; one showing `Δ`
+keeps it until you focus its diff (`Enter`, `Tab`, `Ctrl-w l`) or press `m`.
 
 In the `/` prompt the current query starts selected, so typing replaces it;
 `Backspace`, `Right` or `End` keep it for editing. `Ctrl-u` clears the prompt

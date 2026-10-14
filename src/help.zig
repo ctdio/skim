@@ -179,7 +179,6 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "Enter", .desc = "Open the selected PR" },
             .{ .key = "c", .desc = "Changes since seen ⇄ PR's own diff (sidebar or diff)" },
             .{ .key = "m", .desc = "Mark seen / unseen (sidebar or diff)" },
-            .{ .key = "Δ • ◆", .desc = "Pushed since seen · never seen · cached" },
             .{ .key = "3s preview", .desc = "Marks a never-seen PR seen (Δ needs Enter/Tab/m)" },
             .{ .key = "f", .desc = "Filter menu (presets, toggles, clear)" },
             .{ .key = "j/k  Enter", .desc = "Filter menu: move / apply (Esc closes)" },
@@ -193,6 +192,21 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "?", .desc = "This help (from the sidebar)" },
         };
         for (sidebar_bindings) |b| {
+            try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
+        }
+        try content_lines.append(app.allocator, .{ .blank = true });
+
+        // The row's status columns, left to right; the panel under the list
+        // spells out the selected PR's.
+        try content_lines.append(app.allocator, .{ .section = "PR SIDEBAR SYMBOLS" });
+        const sidebar_symbols = [_]Binding{
+            .{ .key = "D", .desc = "Draft" },
+            .{ .key = "✓ ✗ ⋯", .desc = "CI passing · failing · running" },
+            .{ .key = "? ▲ ▼", .desc = "Needs your review · approved · changes requested" },
+            .{ .key = "Δ •", .desc = "New commits since you looked · never opened" },
+            .{ .key = "◆", .desc = "Diff downloaded (opens instantly)" },
+        };
+        for (sidebar_symbols) |b| {
             try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
         }
         try content_lines.append(app.allocator, .{ .blank = true });
