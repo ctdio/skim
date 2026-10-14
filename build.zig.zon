@@ -86,9 +86,15 @@
         // SQLite amalgamation for the PR store (src/pr/db/). Zig strips the
         // archive's single top-level directory, so sqlite3.c / sqlite3.h sit at
         // the package root.
+        //
+        // Use the autoconf tarball, not sqlite-amalgamation-*.zip: its
+        // sqlite3.c / sqlite3.h are byte-identical, but Zig 0.16.0 unpacks zip
+        // files through <global cache>/tmp/ without creating that directory,
+        // so a fresh cache fails with "failed to create temporary zip file:
+        // FileNotFound".
         .sqlite = .{
-            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
-            .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+            .url = "https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz",
+            .hash = "N-V-__8AAKJCwwDXnRHqzy_PjrI_Ss94kfSd-T7vNxQ-b3xA",
         },
     },
 
